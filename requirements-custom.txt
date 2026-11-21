@@ -1,0 +1,4 @@
+# Персональные зависимости форка (Desktop + CUDA для faster-whisper на Windows)
+-r requirements-desktop.txt
+nvidia-cublas-cu12
+nvidia-cudnn-cu12

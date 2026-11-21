@@ -2,7 +2,15 @@
   <img src="assets/ViralCut.iconset/icon_1024x1024.png" width="112" alt="ViralCut" />
 </p>
 
-<h1 align="center">ViralCut</h1>
+<h1 align="center">ViralCut (Personal Fork)</h1>
+
+> **Личная модификация форка [`hiez1337/viralcut`](https://github.com/hiez1337/viralcut)** поверх оригинального проекта [`vanwild11/viralcut`](https://github.com/vanwild11/viralcut).
+>
+> Репозиторий адаптирован под личный ПК (Windows 10/11, AMD Ryzen 7 5700X3D, NVIDIA GeForce RTX 4060 8 GB) и собственные хотелки:
+> - **Whisper на CUDA** (`float16` с откатом на `int8_float16` и `cpu`) вместо CPU-режима по умолчанию;
+> - **Модель `large-v3`** по умолчанию вместо `small`;
+> - **Аппаратный рендер `h264_nvenc`** через FFmpeg;
+> - Зависимости запуска под Windows вынесены в `requirements-custom.txt`, а журнал всех изменений ведётся в [`CUSTOM_CHANGES.md`](CUSTOM_CHANGES.md).
 
 <p align="center">
   <b>Длинное видео → вирусные вертикальные клипы.</b><br/>

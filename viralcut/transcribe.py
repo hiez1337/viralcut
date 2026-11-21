@@ -99,19 +99,11 @@ def _get_model(long_audio: bool = False):
         if not long_audio and _MODEL is not None:
             return _MODEL
         from faster_whisper import WhisperModel
+        from .custom_whisper import whisper_candidates
 
         local_dir = Path(WHISPER_LOCAL_DIR) if WHISPER_LOCAL_DIR else None
         model_ref = str(local_dir) if local_dir and (local_dir / "model.bin").is_file() else WHISPER_MODEL
-        # Для длинных аудио не используем экспериментальный MPS — на нём
-        # ctranslate2 может «зависнуть» на середине многочасового файла.
-        if WHISPER_DEVICE == "auto":
-            # Apple Metal доступен только на macOS; на Windows/Linux сразу CPU.
-            if long_audio or sys.platform != "darwin":
-                candidates = [("cpu", WHISPER_COMPUTE)]
-            else:
-                candidates = [("mps", "float16"), ("cpu", WHISPER_COMPUTE)]
-        else:
-            candidates = [(WHISPER_DEVICE, WHISPER_COMPUTE)]
+        candidates = whisper_candidates(long_audio, WHISPER_DEVICE, WHISPER_COMPUTE)
         last_exc = None
         model = None
         for device, compute in candidates:

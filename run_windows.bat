@@ -14,7 +14,7 @@ if not exist ".venv-win\Scripts\python.exe" (
 call ".venv-win\Scripts\activate.bat"
 python -m pip install --upgrade pip >nul
 echo [ViralCut] ставлю зависимости (первый запуск — несколько минут)...
-pip install -r requirements-desktop.txt || goto :error
+pip install -r requirements-custom.txt || goto :error
 echo [ViralCut] запускаю...
 python desktop\main.py
 goto :eof
