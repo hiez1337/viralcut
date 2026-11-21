@@ -9,15 +9,21 @@
   let isPaused = false;
   let timerId = null;
   let inFlight = false;
+  let activeCtrl = null;
   let lastData = null;
+  let updateEnabled = false;
+  let updateBusy = false;
+  let cleanupBusy = null;
 
   let toggleBtn = null;
   let fabBtn = null;
   let panel = null;
   let headChips = null;
   let bodyEl = null;
-  let footEl = null;
   let pauseBtn = null;
+  let footMetaEl = null;
+  let updSideBtn = null;
+  let updFootBtn = null;
 
   function pctClass(pct) {
     if (pct >= 95) return "err";
@@ -29,11 +35,127 @@
     return val === null || val === undefined ? "—" : `${val}${suffix}`;
   }
 
+  function fmtSizeMb(mb) {
+    if (mb === null || mb === undefined) return "—";
+    const val = Number(mb) || 0;
+    if (val >= 1024) return `${(val / 1024).toFixed(2)} ГБ`;
+    if (val <= 0) return "0 МБ";
+    return `${val.toFixed(1)} МБ`;
+  }
+
   function fmtDurSec(s) {
     const sec = Math.max(0, Math.round(Number(s) || 0));
     const m = Math.floor(sec / 60);
     const r = sec % 60;
     return m > 0 ? `${m}м ${String(r).padStart(2, "0")}с` : `${r}с`;
+  }
+
+  function abortPoll() {
+    clearTimeout(timerId);
+    timerId = null;
+    if (activeCtrl) {
+      try {
+        activeCtrl.abort();
+      } catch (_) {}
+      activeCtrl = null;
+    }
+  }
+
+  function renderUpdateToggle() {
+    const label = updateEnabled ? "Автообнова: вкл" : "Автообнова: выкл";
+    const title = updateEnabled
+      ? "Проверка релизов upstream включена — нажмите, чтобы отключить"
+      : "Проверка релизов upstream отключена — нажмите, чтобы включить";
+    for (const btn of [updSideBtn, updFootBtn]) {
+      if (!btn) continue;
+      btn.textContent = label;
+      btn.title = title;
+      btn.classList.toggle("on", !!updateEnabled);
+      btn.disabled = updateBusy;
+    }
+  }
+
+  async function syncUpdateState() {
+    try {
+      const resp = await fetch("/api/update", { cache: "no-store" });
+      if (!resp.ok) return;
+      const data = await resp.json();
+      updateEnabled = !!data.enabled;
+      renderUpdateToggle();
+    } catch (_) {}
+  }
+
+  async function toggleAutoUpdate() {
+    if (updateBusy) return;
+    const next = !updateEnabled;
+    updateBusy = true;
+    renderUpdateToggle();
+    try {
+      const resp = await fetch("/api/update/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: next }),
+      });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      let data = await resp.json();
+      updateEnabled = !!data.enabled;
+      if (updateEnabled) {
+        const checkResp = await fetch("/api/update?force=true", { cache: "no-store" });
+        if (checkResp.ok) data = await checkResp.json();
+        if (typeof window.renderUpdate === "function") window.renderUpdate(data);
+        if (typeof window.toast === "function") window.toast("Автопроверка обновлений включена");
+      } else {
+        const card = document.getElementById("updateCard");
+        if (card) card.hidden = true;
+        if (typeof window.toast === "function") window.toast("Автопроверка обновлений отключена");
+      }
+    } catch (err) {
+      if (typeof window.toast === "function") {
+        window.toast(`Не удалось изменить автообнову: ${err.message}`, "err");
+      }
+    } finally {
+      updateBusy = false;
+      renderUpdateToggle();
+    }
+  }
+
+  async function runCleanup(scope) {
+    if (cleanupBusy) return;
+    if (scope === "sources") {
+      const msg =
+        "Удалить скачанные исходные видео (source.*) и сегменты стримов завершённых/отменённых проектов?\n\n" +
+        "Готовые клипы и модели Whisper останутся нетронутыми, но обычные и локальные проекты без исходника нельзя будет перерендерить.";
+      if (!window.confirm(msg)) return;
+    }
+    cleanupBusy = scope;
+    if (lastData) renderData(lastData);
+    try {
+      const resp = await fetch("/api/debug/cleanup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      if (lastData && data.storage) {
+        lastData.storage = data.storage;
+      }
+      if (typeof window.toast === "function") {
+        window.toast(
+          data.removed > 0
+            ? `Очищено ${fmtSizeMb(data.freed_mb)} (${data.removed} объект.)`
+            : "Нечего очищать"
+        );
+      }
+    } catch (err) {
+      if (typeof window.toast === "function") {
+        window.toast(`Ошибка очистки: ${err.message}`, "err");
+      }
+    } finally {
+      cleanupBusy = null;
+      if (lastData) renderData(lastData);
+      if (isOpen && !isPaused) scheduleNext(80);
+    }
   }
 
   function buildUI() {
@@ -51,6 +173,13 @@
       toggleBtn.innerHTML = `<span class="vc-dbg-dot"></span><span>Инспектор</span>`;
       row.appendChild(toggleBtn);
 
+      updSideBtn = document.createElement("button");
+      updSideBtn.type = "button";
+      updSideBtn.id = "vcDbgUpdateSide";
+      updSideBtn.className = "vc-dbg-upd-btn";
+      updSideBtn.addEventListener("click", toggleAutoUpdate);
+      row.parentElement.insertBefore(updSideBtn, row.nextSibling);
+
       health.title = "Открыть или скрыть live-инспектор (Ctrl+Shift+D)";
       health.addEventListener("click", () => setOpen(!isOpen));
       toggleBtn.addEventListener("click", () => setOpen(!isOpen));
@@ -67,6 +196,8 @@
     panel.id = "vcDebugPanel";
     panel.className = "vc-dbg-panel";
     panel.setAttribute("aria-label", "Live-инспектор системы");
+    panel.setAttribute("aria-hidden", String(!isOpen));
+    panel.inert = !isOpen;
     panel.innerHTML = `
       <div class="vc-dbg-head">
         <div class="vc-dbg-head-left">
@@ -81,18 +212,40 @@
       <div class="vc-dbg-body" id="vcDbgBody">
         <div class="vc-dbg-note">Загрузка телеметрии…</div>
       </div>
+      <div class="vc-dbg-panel-foot">
+        <span id="vcDbgFootMeta">Ctrl+Shift+D · автообновление live</span>
+        <button type="button" class="vc-dbg-btn vc-dbg-upd-btn" id="vcDbgUpdateFoot">Автообнова: выкл</button>
+      </div>
     `;
     document.body.appendChild(panel);
 
     headChips = document.getElementById("vcDbgHeadChips");
     bodyEl = document.getElementById("vcDbgBody");
     pauseBtn = document.getElementById("vcDbgPause");
+    footMetaEl = document.getElementById("vcDbgFootMeta");
+    updFootBtn = document.getElementById("vcDbgUpdateFoot");
     const closeBtn = document.getElementById("vcDbgClose");
 
+    bodyEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-cleanup]");
+      if (!btn || btn.disabled) return;
+      runCleanup(btn.dataset.cleanup);
+    });
+
+    updFootBtn.addEventListener("click", toggleAutoUpdate);
     pauseBtn.addEventListener("click", () => {
       isPaused = !isPaused;
       pauseBtn.textContent = isPaused ? "Возобновить" : "Пауза";
-      if (!isPaused && isOpen) scheduleNext(40);
+      if (lastData && footMetaEl) {
+        const srv = lastData.server || {};
+        const sys = lastData.system || {};
+        footMetaEl.textContent = `Аптайм: ${fmtDurSec(srv.uptime_s)} · CPU: ${sys.cpu_count || "—"} · ${isPaused ? "пауза" : "live"}`;
+      }
+      if (!isPaused && isOpen) {
+        scheduleNext(40);
+      } else {
+        abortPoll();
+      }
     });
     closeBtn.addEventListener("click", () => setOpen(false));
 
@@ -107,21 +260,27 @@
       if (document.visibilityState === "visible" && isOpen && !isPaused) {
         scheduleNext(80);
       } else {
-        clearTimeout(timerId);
+        abortPoll();
       }
     });
 
+    renderUpdateToggle();
+    syncUpdateState();
     applyOpenState();
   }
 
   function applyOpenState() {
-    if (panel) panel.classList.toggle("open", isOpen);
+    if (panel) {
+      panel.classList.toggle("open", isOpen);
+      panel.setAttribute("aria-hidden", String(!isOpen));
+      panel.inert = !isOpen;
+    }
     if (toggleBtn) toggleBtn.classList.toggle("open", isOpen);
     document.body.classList.toggle("vc-dbg-open", isOpen);
     if (isOpen && !isPaused) {
       scheduleNext(30);
     } else {
-      clearTimeout(timerId);
+      abortPoll();
     }
   }
 
@@ -159,6 +318,7 @@
     const dl = d.download || {};
     const projs = d.active_projects || [];
     const kids = d.children || [];
+    const st = d.storage || {};
 
     const encLabel = srv.hw_encoder ? srv.hw_encoder.replace("h264_", "").toUpperCase() : "LIBX264";
     headChips.innerHTML = `
@@ -167,12 +327,12 @@
       <span class="vc-dbg-chip">${esc(srv.render_workers || 1)}× воркер</span>
     `;
 
-    // 1. Hardware card
     const vramUsed = gpu.vram_used_mb;
     const vramTotal = gpu.vram_total_mb;
     const vramPct = vramUsed != null && vramTotal ? Math.min(100, Math.round((vramUsed / vramTotal) * 100)) : 0;
     const gpuPct = gpu.util_pct != null ? Math.min(100, Math.round(gpu.util_pct)) : 0;
     const sysCpu = sys.cpu_pct != null ? Math.min(100, Math.round(sys.cpu_pct)) : 0;
+    const tempStr = gpu.temp_c != null ? ` · ${Math.round(gpu.temp_c)}°C` : "";
 
     const hwHtml = `
       <div class="vc-dbg-card">
@@ -181,7 +341,7 @@
           ${gpu.available ? `<span class="vc-dbg-chip ${gpu.process_on_gpu ? "ok" : ""}">${gpu.process_on_gpu ? "Python на GPU" : "GPU готов"}</span>` : `<span class="vc-dbg-chip">CPU</span>`}
         </div>
         ${gpu.available ? `
-          <div class="vc-dbg-kv"><span class="vc-dbg-k">${esc(gpu.name || "GPU")}</span><span class="vc-dbg-v">${fmtNum(gpu.util_pct, "%")}${gpu.temp_c != null ? ` · ${gpu.temp_c}°C` : ""}</span></div>
+          <div class="vc-dbg-kv"><span class="vc-dbg-k">${esc(gpu.name || "GPU")}</span><span class="vc-dbg-v">${fmtNum(gpu.util_pct, "%")}${tempStr}</span></div>
           <div class="vc-dbg-bar"><i class="${pctClass(gpuPct)}" style="width:${gpuPct}%"></i></div>
           <div class="vc-dbg-kv"><span class="vc-dbg-k">VRAM</span><span class="vc-dbg-v">${fmtNum(vramUsed)} / ${fmtNum(vramTotal, " MiB")}</span></div>
           <div class="vc-dbg-bar"><i class="${pctClass(vramPct)}" style="width:${vramPct}%"></i></div>
@@ -192,7 +352,6 @@
       </div>
     `;
 
-    // 2. Whisper card
     const isCuda = String(w.device || "").startsWith("cuda");
     const devClass = isCuda ? "ok" : w.device === "cpu" ? "warn" : "";
     const devLabel = `${w.device || "auto"} · ${w.compute_type || "—"}`;
@@ -217,7 +376,6 @@
       </div>
     `;
 
-    // 3. Source & Download card
     const resPill = dl.source_height && dl.target_height
       ? (dl.upscale_warning
           ? `<span class="vc-dbg-chip warn">${dl.source_height}p → ${dl.target_height}p upscale</span>`
@@ -238,7 +396,6 @@
       </div>
     `;
 
-    // 4. Active stage & child processes card
     const projRows = projs.map((p) => `
       <div class="vc-dbg-proc">
         <div class="vc-dbg-proc-top">
@@ -273,18 +430,43 @@
       </div>
     `;
 
+    const hasStorage = d.storage && st.projects_mb != null;
+    const tempItems = Number(st.temp_items || 0);
+    const srcItems = Number(st.sources_items || 0);
+    const storageHtml = `
+      <div class="vc-dbg-card vc-dbg-wide">
+        <div class="vc-dbg-card-head">
+          <span>Диск и очистка</span>
+          <span class="vc-dbg-chip">${hasStorage ? `проекты ${fmtSizeMb(st.projects_mb)}` : "—"}</span>
+        </div>
+        <div class="vc-dbg-kv">
+          <span class="vc-dbg-k">Клипы / Временные / Исходники</span>
+          <span class="vc-dbg-v">${hasStorage ? `${fmtSizeMb(st.clips_mb)} · ${fmtSizeMb(st.temp_mb)} · ${fmtSizeMb(st.sources_mb)}` : "—"}</span>
+        </div>
+        <div class="vc-dbg-clean-actions">
+          <button type="button" class="vc-dbg-btn vc-dbg-clean-btn" data-cleanup="temp" ${(!hasStorage || !tempItems || cleanupBusy) ? "disabled" : ""}>
+            ${cleanupBusy === "temp" ? "Очистка…" : `Очистить временные (${fmtSizeMb(st.temp_mb)})`}
+          </button>
+          <button type="button" class="vc-dbg-btn vc-dbg-clean-btn warn" data-cleanup="sources" ${(!hasStorage || !srcItems || cleanupBusy) ? "disabled" : ""}>
+            ${cleanupBusy === "sources" ? "Удаление…" : `Удалить исходники (${fmtSizeMb(st.sources_mb)})`}
+          </button>
+        </div>
+        <div class="vc-dbg-note">Модели Whisper (${fmtSizeMb(st.models_mb)}) и готовые клипы не затрагиваются${st.active_skipped ? ` · активных задач защищено: ${st.active_skipped}` : ""}.</div>
+      </div>
+    `;
+
     bodyEl.innerHTML = `
       <div class="vc-dbg-grid">
         ${hwHtml}
         ${whisperHtml}
         ${dlHtml}
         ${stageHtml}
-      </div>
-      <div class="vc-dbg-foot">
-        <span>Аптайм: ${fmtDurSec(srv.uptime_s)} · Потоки CPU: ${esc(sys.cpu_count || "—")}</span>
-        <span>Ctrl+Shift+D · автообновление ${isPaused ? "на паузе" : "live"}</span>
+        ${storageHtml}
       </div>
     `;
+    if (footMetaEl) {
+      footMetaEl.textContent = `Аптайм: ${fmtDurSec(srv.uptime_s)} · CPU: ${sys.cpu_count || "—"} · Ctrl+Shift+D · ${isPaused ? "пауза" : "live"}`;
+    }
   }
 
   function scheduleNext(delayMs) {
@@ -300,10 +482,15 @@
       return;
     }
     inFlight = true;
+    activeCtrl = typeof AbortController === "function" ? new AbortController() : null;
     try {
-      const resp = await fetch("/api/debug", { cache: "no-store" });
+      const resp = await fetch("/api/debug", {
+        cache: "no-store",
+        signal: activeCtrl ? activeCtrl.signal : undefined,
+      });
       if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
       const data = await resp.json();
+      if (!isOpen || isPaused) return;
       renderData(data);
       const busy =
         (data.active_projects && data.active_projects.length > 0) ||
@@ -312,11 +499,13 @@
         (data.whisper && data.whisper.downloading);
       scheduleNext(busy ? 1000 : 2000);
     } catch (err) {
+      if (err && err.name === "AbortError") return;
       if (bodyEl && !lastData) {
         bodyEl.innerHTML = `<div class="vc-dbg-note warn">Не удалось прочитать /api/debug: ${esc(err.message)}</div>`;
       }
       scheduleNext(2500);
     } finally {
+      activeCtrl = null;
       inFlight = false;
     }
   }

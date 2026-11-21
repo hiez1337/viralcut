@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from . import analyze, db, downloader, reframe, render, subtitles, transcribe, utils
+from . import analyze, custom_downloader, db, downloader, reframe, render, subtitles, transcribe, utils
 from .errors import Cancelled
 from .config import PROJECTS_DIR
 
@@ -91,18 +91,23 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 
 CANCELLED: set = set()
+_CANCEL_LOCK = threading.Lock()
 
 
 def request_cancel(pid: str) -> None:
-    CANCELLED.add(pid)
+    with _CANCEL_LOCK:
+        CANCELLED.add(pid)
 
 
 def clear_cancel(pid: str) -> None:
-    CANCELLED.discard(pid)
+    with _CANCEL_LOCK:
+        CANCELLED.discard(pid)
 
 
 def _check_cancel(pid: str) -> None:
-    if pid in CANCELLED:
+    with _CANCEL_LOCK:
+        is_cancelled = pid in CANCELLED
+    if is_cancelled:
         raise Cancelled()
 
 
@@ -261,8 +266,13 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
         )
         shutil.copy2(part, preview_path)
         shutil.rmtree(workdir / "preview_src", ignore_errors=True)
+    except Cancelled:
+        preview_path.unlink(missing_ok=True)
+        shutil.rmtree(workdir / "preview_src", ignore_errors=True)
+        raise
     except Exception:
         preview_path.unlink(missing_ok=True)
+        shutil.rmtree(workdir / "preview_src", ignore_errors=True)
         traceback.print_exc()
 
     _update(pid, status="review", progress=100, error=None,
@@ -329,12 +339,13 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                         lambda p, _i=i: progress(0.55 + (_i + p) / total * 0.45, label))
             db.update_clip(clip["id"], status="ready", error=None)
             rendered += 1
-            shutil.rmtree(sections / clip["id"], ignore_errors=True)
         except Cancelled:
             raise
         except Exception as exc:  # noqa: BLE001
             traceback.print_exc()
             db.update_clip(clip["id"], status="error", error=str(exc)[:400])
+        finally:
+            shutil.rmtree(sections / clip["id"], ignore_errors=True)
 
     elapsed = round(time.time() - started, 1)
     if rendered == 0:
@@ -429,6 +440,9 @@ def process_project(pid: str) -> None:
                 on_progress=lambda p, s: progress(0.05 + p * 0.45, f"{s} {int(p*100)}%"),
             )
             stop_hb.set(); hb_thread.join(timeout=1)
+        except Cancelled:
+            stop_hb.set(); hb_thread.join(timeout=1)
+            raise
         except Exception as exc:  # noqa: BLE001
             stop_hb.set(); hb_thread.join(timeout=1)
             sub_path = downloader.fetch_subtitles(project["url"], workdir,
@@ -502,13 +516,23 @@ def process_project(pid: str) -> None:
                     state["failed"] += 1
                     state["done"] += 1
                     done, failed = state["done"], state["failed"]
-                progress(0.60 + (done / max(1, total)) * 0.40,
-                         f"Рендер: {done} из {total} готово" + (f" · ошибок {failed}" if failed else ""))
+                try:
+                    progress(0.60 + (done / max(1, total)) * 0.40,
+                             f"Рендер: {done} из {total} готово" + (f" · ошибок {failed}" if failed else ""))
+                except Cancelled:
+                    with lock:
+                        state["cancel"] = True
+                    return False
                 return False
             with lock:
                 state["done"] += 1
                 done = state["done"]
-            progress(0.60 + (done / max(1, total)) * 0.40, f"Рендер: {done} из {total} готово")
+            try:
+                progress(0.60 + (done / max(1, total)) * 0.40, f"Рендер: {done} из {total} готово")
+            except Cancelled:
+                with lock:
+                    state["cancel"] = True
+                return False
             return True
 
         workers = min(_render_workers(), max(1, total))
@@ -619,11 +643,9 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         raise RuntimeError("Клип не найден")
     workdir = PROJECTS_DIR / project["id"]
     live_recording = (workdir / "segments" / "times.jsonl").exists()
-    if not project.get("source") and not live_recording:
-        raise RuntimeError("Исходное видео не найдено: запись эфира удалена или ещё не началась.")
     settings = dict(clip["settings"])
-    if settings.get("segments"):
-        raise RuntimeError("Клип собран в экономном режиме из фрагмента. Шаблон меняется до запуска нарезки.")
+    if not project.get("source") and not live_recording and not settings.get("segments"):
+        raise RuntimeError("Исходное видео не найдено: запись эфира удалена или ещё не началась.")
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
                 "sub_size", "sub_font", "sub_position", "sub_offset", "sub_speed"):
         if key in payload and payload[key] is not None:
@@ -633,7 +655,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     if end - start < 3:
         raise RuntimeError("Клип слишком короткий")
     words = list(clip["words"] or [])
-    if not project.get("source"):
+    if not project.get("source") and not settings.get("segments"):
         from . import live
         # старые live-клипы хранили слова относительно окна эфира
         words = live._absolute_words(words, float(clip["start"]))
@@ -647,7 +669,9 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
                    caption=payload.get("caption", clip["caption"]),
                    settings=settings, error=None)
     updated = db.get_clip(clip_id)
-    if project.get("source"):
+    if settings.get("segments"):
+        custom_downloader.rerender_section_clip(project, updated, workdir, settings, on_progress)
+    elif project.get("source"):
         _render_one(Path(project["source"]), workdir, updated, settings, on_progress)
     else:
         from . import live

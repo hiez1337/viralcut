@@ -16,7 +16,10 @@ from .utils import subprocess_kwargs
 
 _LOCK = threading.Lock()
 _HW_LOCK = threading.Lock()
+_WIN32_LOCK = threading.Lock()
 _STARTED_AT = time.time()
+_GPU_MISSING_UNTIL = 0.0
+_IDLE_WHISPER_CANDIDATE: Optional[Tuple[str, str]] = None
 
 _EXPECTED_MODEL_MB: Dict[str, int] = {
     "tiny": 75,
@@ -97,65 +100,68 @@ def _init_win32() -> None:
     global _WIN32_READY, _K32
     if _WIN32_READY or not sys.platform.startswith("win"):
         return
-    try:
-        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        k32.GetCurrentProcess.argtypes = []
-        k32.GetCurrentProcess.restype = wt.HANDLE
+    with _WIN32_LOCK:
+        if _WIN32_READY:
+            return
+        try:
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.GetCurrentProcess.argtypes = []
+            k32.GetCurrentProcess.restype = wt.HANDLE
 
-        k32.K32GetProcessMemoryInfo.argtypes = [
-            wt.HANDLE,
-            ctypes.POINTER(_PROCESS_MEMORY_COUNTERS),
-            wt.DWORD,
-        ]
-        k32.K32GetProcessMemoryInfo.restype = wt.BOOL
+            k32.K32GetProcessMemoryInfo.argtypes = [
+                wt.HANDLE,
+                ctypes.POINTER(_PROCESS_MEMORY_COUNTERS),
+                wt.DWORD,
+            ]
+            k32.K32GetProcessMemoryInfo.restype = wt.BOOL
 
-        k32.GetProcessTimes.argtypes = [
-            wt.HANDLE,
-            ctypes.POINTER(wt.FILETIME),
-            ctypes.POINTER(wt.FILETIME),
-            ctypes.POINTER(wt.FILETIME),
-            ctypes.POINTER(wt.FILETIME),
-        ]
-        k32.GetProcessTimes.restype = wt.BOOL
+            k32.GetProcessTimes.argtypes = [
+                wt.HANDLE,
+                ctypes.POINTER(wt.FILETIME),
+                ctypes.POINTER(wt.FILETIME),
+                ctypes.POINTER(wt.FILETIME),
+                ctypes.POINTER(wt.FILETIME),
+            ]
+            k32.GetProcessTimes.restype = wt.BOOL
 
-        k32.GetSystemTimes.argtypes = [
-            ctypes.POINTER(wt.FILETIME),
-            ctypes.POINTER(wt.FILETIME),
-            ctypes.POINTER(wt.FILETIME),
-        ]
-        k32.GetSystemTimes.restype = wt.BOOL
+            k32.GetSystemTimes.argtypes = [
+                ctypes.POINTER(wt.FILETIME),
+                ctypes.POINTER(wt.FILETIME),
+                ctypes.POINTER(wt.FILETIME),
+            ]
+            k32.GetSystemTimes.restype = wt.BOOL
 
-        k32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MEMORYSTATUSEX)]
-        k32.GlobalMemoryStatusEx.restype = wt.BOOL
+            k32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(_MEMORYSTATUSEX)]
+            k32.GlobalMemoryStatusEx.restype = wt.BOOL
 
-        k32.CreateFileW.argtypes = [
-            wt.LPCWSTR,
-            wt.DWORD,
-            wt.DWORD,
-            ctypes.c_void_p,
-            wt.DWORD,
-            wt.DWORD,
-            wt.HANDLE,
-        ]
-        k32.CreateFileW.restype = wt.HANDLE
+            k32.CreateFileW.argtypes = [
+                wt.LPCWSTR,
+                wt.DWORD,
+                wt.DWORD,
+                ctypes.c_void_p,
+                wt.DWORD,
+                wt.DWORD,
+                wt.HANDLE,
+            ]
+            k32.CreateFileW.restype = wt.HANDLE
 
-        k32.GetFileSizeEx.argtypes = [wt.HANDLE, ctypes.POINTER(ctypes.c_int64)]
-        k32.GetFileSizeEx.restype = wt.BOOL
+            k32.GetFileSizeEx.argtypes = [wt.HANDLE, ctypes.POINTER(ctypes.c_int64)]
+            k32.GetFileSizeEx.restype = wt.BOOL
 
-        k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
-        k32.OpenProcess.restype = wt.HANDLE
+            k32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+            k32.OpenProcess.restype = wt.HANDLE
 
-        k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
-        k32.GetExitCodeProcess.restype = wt.BOOL
+            k32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+            k32.GetExitCodeProcess.restype = wt.BOOL
 
-        k32.CloseHandle.argtypes = [wt.HANDLE]
-        k32.CloseHandle.restype = wt.BOOL
+            k32.CloseHandle.argtypes = [wt.HANDLE]
+            k32.CloseHandle.restype = wt.BOOL
 
-        _K32 = k32
-        _WIN32_READY = True
-    except Exception:
-        _K32 = None
-        _WIN32_READY = False
+            _K32 = k32
+            _WIN32_READY = True
+        except Exception:
+            _K32 = None
+            _WIN32_READY = False
 
 
 def _ft_to_sec(ft: wt.FILETIME) -> float:
@@ -439,6 +445,7 @@ def _parse_float(raw: str) -> Optional[float]:
 
 
 def _sample_gpu(tracked_pids: List[int]) -> Dict[str, Any]:
+    global _GPU_MISSING_UNTIL
     empty = {
         "available": False,
         "name": None,
@@ -448,6 +455,8 @@ def _sample_gpu(tracked_pids: List[int]) -> Dict[str, Any]:
         "temp_c": None,
         "process_on_gpu": False,
     }
+    if time.monotonic() < _GPU_MISSING_UNTIL:
+        return empty
     try:
         proc = subprocess.run(
             [
@@ -467,13 +476,14 @@ def _sample_gpu(tracked_pids: List[int]) -> Dict[str, Any]:
         parts = [p.strip() for p in line.split(",")]
         if len(parts) < 5:
             return empty
+        temp_val = _parse_float(parts[4])
         gpu = {
             "available": True,
             "name": parts[0] or "NVIDIA GPU",
             "util_pct": _parse_float(parts[1]),
             "vram_used_mb": _parse_float(parts[2]),
             "vram_total_mb": _parse_float(parts[3]),
-            "temp_c": _parse_float(parts[4]),
+            "temp_c": round(temp_val) if temp_val is not None else None,
             "process_on_gpu": False,
         }
         apps = subprocess.run(
@@ -493,6 +503,9 @@ def _sample_gpu(tracked_pids: List[int]) -> Dict[str, Any]:
             watch_pids = {os.getpid(), *(int(p) for p in tracked_pids)}
             gpu["process_on_gpu"] = bool(watch_pids & gpu_pids)
         return gpu
+    except FileNotFoundError:
+        _GPU_MISSING_UNTIL = time.monotonic() + 60.0
+        return empty
     except Exception:
         return empty
 
@@ -511,18 +524,43 @@ def _sample_hw_cached(tracked_pids: List[int]) -> Tuple[Dict[str, Any], Dict[str
         return dict(srv), dict(sys_info), dict(gpu)
 
 
+def _safe_mtime(path: Path) -> float:
+    try:
+        return float(path.stat().st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _resolved_idle_whisper() -> Tuple[str, str]:
+    global _IDLE_WHISPER_CANDIDATE
+    if _IDLE_WHISPER_CANDIDATE is not None:
+        return _IDLE_WHISPER_CANDIDATE
+    try:
+        from .custom_whisper import whisper_candidates
+
+        cands = whisper_candidates(False, WHISPER_DEVICE, WHISPER_COMPUTE)
+        pair = cands[0] if cands else (WHISPER_DEVICE, WHISPER_COMPUTE)
+    except Exception:
+        pair = (WHISPER_DEVICE, WHISPER_COMPUTE)
+    _IDLE_WHISPER_CANDIDATE = pair
+    return pair
+
+
 def _inspect_model_cache(model_name: str) -> Dict[str, Any]:
     expected_mb = _EXPECTED_MODEL_MB.get(model_name)
     if WHISPER_LOCAL_DIR:
         local_bin = Path(WHISPER_LOCAL_DIR) / "model.bin"
-        if local_bin.is_file():
-            return {
-                "cached": True,
-                "cache_mb": round(local_bin.stat().st_size / 1048576.0, 1),
-                "expected_mb": expected_mb,
-                "downloading": False,
-                "download_speed_mbps": 0.0,
-            }
+        try:
+            if local_bin.is_file():
+                return {
+                    "cached": True,
+                    "cache_mb": round(local_bin.stat().st_size / 1048576.0, 1),
+                    "expected_mb": expected_mb,
+                    "downloading": False,
+                    "download_speed_mbps": 0.0,
+                }
+        except OSError:
+            pass
 
     model_dir = MODELS_DIR / f"models--Systran--faster-whisper-{model_name}"
     if model_dir.is_dir():
@@ -542,30 +580,31 @@ def _inspect_model_cache(model_name: str) -> Dict[str, Any]:
 
         blobs_dir = model_dir / "blobs"
         if blobs_dir.is_dir():
-            incompletes = sorted(blobs_dir.glob("*.incomplete"), key=lambda p: p.stat().st_mtime, reverse=True)
+            incompletes = sorted(blobs_dir.glob("*.incomplete"), key=_safe_mtime, reverse=True)
             if incompletes:
                 target = incompletes[0]
                 size_bytes = _live_file_size(target)
                 now = time.monotonic()
-                speed = float(_MODEL_DL_PREV.get("speed_mbps") or 0.0)
-                if _MODEL_DL_PREV.get("path") == str(target):
-                    dt = now - float(_MODEL_DL_PREV.get("ts") or 0.0)
-                    if dt >= 0.25:
-                        delta = max(0, size_bytes - int(_MODEL_DL_PREV.get("bytes") or 0))
-                        speed = round(delta / dt / 1048576.0, 2)
+                with _LOCK:
+                    speed = float(_MODEL_DL_PREV.get("speed_mbps") or 0.0)
+                    if _MODEL_DL_PREV.get("path") == str(target):
+                        dt = now - float(_MODEL_DL_PREV.get("ts") or 0.0)
+                        if dt >= 0.25:
+                            delta = max(0, size_bytes - int(_MODEL_DL_PREV.get("bytes") or 0))
+                            speed = round(delta / dt / 1048576.0, 2)
+                            _MODEL_DL_PREV.update({
+                                "ts": now,
+                                "bytes": size_bytes,
+                                "speed_mbps": speed,
+                            })
+                    else:
                         _MODEL_DL_PREV.update({
                             "ts": now,
                             "bytes": size_bytes,
-                            "speed_mbps": speed,
+                            "path": str(target),
+                            "speed_mbps": 0.0,
                         })
-                else:
-                    _MODEL_DL_PREV.update({
-                        "ts": now,
-                        "bytes": size_bytes,
-                        "path": str(target),
-                        "speed_mbps": 0.0,
-                    })
-                    speed = 0.0
+                        speed = 0.0
                 return {
                     "cached": False,
                     "cache_mb": round(size_bytes / 1048576.0, 1),
@@ -669,8 +708,19 @@ def snapshot() -> Dict[str, Any]:
     cache_info = _inspect_model_cache(str(whisper_state.get("model") or WHISPER_MODEL))
     if cache_info.get("downloading") and whisper_state.get("status") in ("idle", "loading"):
         whisper_state["status"] = "downloading"
+    if whisper_state.get("status") == "idle" and whisper_state.get("device") == "auto":
+        dev, comp = _resolved_idle_whisper()
+        whisper_state["device"] = dev
+        whisper_state["compute_type"] = comp
 
     active_projects = _collect_active_projects()
+
+    try:
+        from . import custom_cleanup
+
+        storage = custom_cleanup.storage_summary()
+    except Exception:
+        storage = None
 
     return {
         "ts": round(now, 3),
@@ -688,4 +738,5 @@ def snapshot() -> Dict[str, Any]:
         "download": download_state,
         "active_projects": active_projects,
         "children": children,
+        "storage": storage,
     }

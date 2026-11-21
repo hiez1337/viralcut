@@ -1,6 +1,7 @@
 """Custom YouTube format ranking and section downloader fixes for the personal fork."""
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 import time
@@ -9,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import custom_debug, utils
 from .config import ffmpeg, ffmpeg_bin_dir
+from .errors import Cancelled
 
 
 def pick_best_format(info: Dict[str, Any], max_height: int) -> Tuple[str, int]:
@@ -292,6 +294,9 @@ def download_section_smart(
                 fallback_reason=fallback_reason or "",
             )
             return path, meta
+        except Cancelled:
+            custom_debug.record_download(active=False, kind="section")
+            raise
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             failed_reasons.append(downloader._fmt_err(exc))
@@ -306,3 +311,52 @@ def download_section_smart(
     if last_error:
         raise last_error
     raise downloader.DownloadError("Не удалось скачать фрагмент видео.")
+
+
+def rerender_section_clip(
+    project: Dict[str, Any],
+    clip: Dict[str, Any],
+    workdir: Path,
+    settings: Dict[str, Any],
+    on_progress: Optional[Any] = None,
+) -> None:
+    """Re-download only the target section and re-render an eco-mode clip cleanly."""
+    from . import downloader, pipeline
+
+    url = str(project.get("url") or "").strip()
+    if not url.startswith(("http://", "https://")):
+        raise RuntimeError("Нельзя перерендерить экономный клип без ссылки на исходное видео.")
+
+    opts = project.get("options") or {}
+    duration = float(project.get("duration") or 0)
+    clip_start = float(clip["start"])
+    clip_end = float(clip["end"])
+    sec_start = max(0.0, clip_start - 0.5)
+    sec_end = min(duration or clip_end + 1.0, clip_end + 0.5)
+    sec_dir = workdir / "sections" / f"rerender_{clip['id']}"
+
+    try:
+        part = downloader.download_section(
+            url,
+            sec_dir,
+            sec_start,
+            sec_end,
+            browser=opts.get("cookies_browser") or None,
+            max_height=int(opts.get("max_height", 1080)),
+            force_hd=bool(opts.get("force_hd", False)),
+        )
+        actual = utils.media_duration(part)
+        offset = max(0.0, clip_start - sec_start)
+        words = [
+            {**w, "start": float(w["start"]) - sec_start, "end": float(w["end"]) - sec_start}
+            for w in (clip.get("words") or [])
+        ]
+        virtual = {
+            **clip,
+            "start": offset,
+            "end": min(actual, offset + (clip_end - clip_start)),
+            "words": words,
+        }
+        pipeline._render_one(part, workdir, virtual, settings, on_progress)
+    finally:
+        shutil.rmtree(sec_dir, ignore_errors=True)

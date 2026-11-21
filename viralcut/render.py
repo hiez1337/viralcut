@@ -133,6 +133,93 @@ def _measure_loudness(source: Path, start: float, duration: float) -> Optional[D
         return None
 
 
+def _run_render_proc(
+    cmd: List[str],
+    duration: float,
+    out_path: Path,
+    encoder_label: str,
+    source_res: str,
+    target_res: str,
+    on_progress: Optional[Callable[[float], None]],
+) -> Tuple[int, List[str], bool, str]:
+    """Run ffmpeg render process with stderr draining, progress tracking, and watchdog."""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        bufsize=1,
+        **subprocess_kwargs(),
+    )
+    assert proc.stdout is not None and proc.stderr is not None
+    custom_debug.register_process(
+        proc.pid,
+        "ffmpeg",
+        label=out_path.name,
+        encoder=encoder_label,
+        source_res=source_res,
+        target_res=target_res,
+    )
+
+    tail: List[str] = []
+    killed = {"hit": False, "reason": ""}
+
+    def _drain_stderr() -> None:
+        try:
+            for line in proc.stderr:  # type: ignore[union-attr]
+                tail.append(line)
+                if len(tail) > 40:
+                    tail.pop(0)
+        except Exception:
+            pass
+
+    reader = threading.Thread(target=_drain_stderr, daemon=True)
+    reader.start()
+
+    limit = max(180.0, duration * 8.0)
+
+    def _watchdog() -> None:
+        if proc.poll() is not None:
+            return
+        killed["hit"] = True
+        killed["reason"] = f"нет прогресса больше {limit:.0f} с"
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+    timer = threading.Timer(limit, _watchdog)
+    timer.daemon = True
+    timer.start()
+    try:
+        for line in proc.stdout:
+            line = line.strip()
+            if line.startswith("out_time_us="):
+                try:
+                    done = int(line.split("=", 1)[1]) / 1_000_000
+                except ValueError:
+                    continue
+                prog = round(min(0.99, done / duration), 3)
+                custom_debug.update_process(proc.pid, progress=prog)
+                if on_progress:
+                    on_progress(prog)
+        proc.wait()
+    finally:
+        timer.cancel()
+        reader.join(timeout=2)
+        for stream in (proc.stdout, proc.stderr):
+            try:
+                if stream is not None:
+                    stream.close()
+            except Exception:
+                pass
+        custom_debug.unregister_process(proc.pid)
+
+    rc = int(proc.returncode) if proc.returncode is not None else -1
+    return rc, tail, bool(killed["hit"]), str(killed["reason"])
+
+
 def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path,
                 ass_path: Optional[Path] = None, aspect: str = "9:16",
                 mode: str = "blur", focus_x: float = 0.5,
@@ -167,11 +254,11 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     filter_complex = ";".join(parts)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    cmd = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
-           "-progress", "pipe:1",
-           "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
+    base_cmd = [ffmpeg(), "-y", "-hide_banner", "-v", "error", "-nostats",
+                "-progress", "pipe:1",
+                "-ss", f"{clip_start:.3f}", "-t", f"{duration:.3f}", "-i", str(source)]
 
-    cmd += ["-filter_complex", filter_complex, "-map", vlabel]
+    base_cmd += ["-filter_complex", filter_complex, "-map", vlabel]
     if info["has_audio"]:
         measured = _measure_loudness(source, clip_start, duration)
         if measured:
@@ -185,100 +272,49 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             audio_filter = "loudnorm=I=-14:TP=-1.5:LRA=11"
         fade_out = max(0.0, duration - 0.06)
         audio_filter += f",afade=t=in:st=0:d=0.03,afade=t=out:st={fade_out:.3f}:d=0.05"
-        cmd += ["-map", "0:a:0", "-af", audio_filter,
-                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
+        base_cmd += ["-map", "0:a:0", "-af", audio_filter,
+                     "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2"]
     else:
-        cmd += ["-an"]
+        base_cmd += ["-an"]
 
     hw = hw_encoder()
-    video_args = _hw_args(hw, crf) if hw else ["-c:v", "libx264", "-preset", preset,
-                                               "-crf", str(crf), "-profile:v", "high",
-                                               "-pix_fmt", "yuv420p"]
-    cmd += video_args + ["-r", "30", "-movflags", "+faststart", "-shortest", str(out_path)]
+    libx264_args = ["-c:v", "libx264", "-preset", preset,
+                    "-crf", str(crf), "-profile:v", "high",
+                    "-pix_fmt", "yuv420p"]
+    video_args = _hw_args(hw, crf) if hw else libx264_args
+    tail_args = ["-r", "30", "-movflags", "+faststart", "-shortest", str(out_path)]
+    source_res = f"{info['width']}x{info['height']}"
+    target_res = f"{w}x{h}"
 
     # -progress в cmd даёт машинно-читаемый прогресс: UI не «замирает» на минуту.
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            errors="replace", bufsize=1, **subprocess_kwargs())
-    assert proc.stdout is not None and proc.stderr is not None
-    custom_debug.register_process(
-        proc.pid, "ffmpeg", label=out_path.name, encoder=hw or "libx264",
-        source_res=f"{info['width']}x{info['height']}", target_res=f"{w}x{h}",
+    rc, tail, was_killed, kill_reason = _run_render_proc(
+        base_cmd + video_args + tail_args,
+        duration,
+        out_path,
+        hw or "libx264",
+        source_res,
+        target_res,
+        on_progress,
     )
-
-    tail: list = []
-    killed = {"hit": False, "reason": ""}
-
-    def _drain_stderr() -> None:
-        for line in proc.stderr:  # type: ignore[union-attr]
-            tail.append(line)
-            if len(tail) > 40:
-                tail.pop(0)
-
-    reader = threading.Thread(target=_drain_stderr, daemon=True)
-    reader.start()
-
-    # Щедрый, но конечный предел: зависший ffmpeg не должен держать клип вечно.
-    limit = max(180.0, duration * 8.0)
-
-    def _watchdog() -> None:
-        if proc.poll() is not None:
-            return
-        killed["hit"] = True
-        killed["reason"] = f"нет прогресса больше {limit:.0f} с"
-        try:
-            proc.kill()
-        except Exception:
-            pass
-
-    timer = threading.Timer(limit, _watchdog)
-    timer.daemon = True
-    timer.start()
-    try:
-        for line in proc.stdout:
-            line = line.strip()
-            if line.startswith("out_time_us="):
-                try:
-                    done = int(line.split("=", 1)[1]) / 1_000_000
-                except ValueError:
-                    continue
-                prog = round(min(0.99, done / duration), 3)
-                custom_debug.update_process(proc.pid, progress=prog)
-                if on_progress:
-                    on_progress(prog)
-        proc.wait()
-    finally:
-        timer.cancel()
-        reader.join(timeout=2)
-        custom_debug.unregister_process(proc.pid)
-
-    if killed["hit"]:
+    if was_killed:
         out_path.unlink(missing_ok=True)
-        raise MediaError(f"Рендер остановлен: {killed['reason']}. Попробуйте ещё раз.")
-    if hw and (proc.returncode != 0 or not out_path.exists()):
+        raise MediaError(f"Рендер остановлен: {kill_reason}. Попробуйте ещё раз.")
+    if hw and (rc != 0 or not out_path.exists()):
         # аппаратный энкодер не завёлся (нет GPU/драйвера) — повторяем на libx264
-        idx = cmd.index("-c:v")
-        cmd[idx + 1:idx + 1 + len(_hw_args(hw, crf)) - 1] = []
-        cmd[idx:idx + len(_hw_args(hw, crf))] = ["-c:v", "libx264", "-preset", preset,
-                                                 "-crf", str(crf), "-profile:v", "high",
-                                                 "-pix_fmt", "yuv420p"]
         out_path.unlink(missing_ok=True)
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                text=True, errors="replace", bufsize=1, **subprocess_kwargs())
-        custom_debug.register_process(
-            proc.pid, "ffmpeg", label=out_path.name, encoder="libx264",
-            source_res=f"{info['width']}x{info['height']}", target_res=f"{w}x{h}",
+        rc, tail, was_killed, kill_reason = _run_render_proc(
+            base_cmd + libx264_args + tail_args,
+            duration,
+            out_path,
+            "libx264",
+            source_res,
+            target_res,
+            on_progress,
         )
-        tail = []
-        try:
-            if proc.stderr is not None:
-                for line in proc.stderr:
-                    tail.append(line)
-                    if len(tail) > 40:
-                        tail.pop(0)
-            proc.wait()
-        finally:
-            custom_debug.unregister_process(proc.pid)
-    if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 10000:
+        if was_killed:
+            out_path.unlink(missing_ok=True)
+            raise MediaError(f"Рендер остановлен: {kill_reason}. Попробуйте ещё раз.")
+    if rc != 0 or not out_path.exists() or out_path.stat().st_size < 10000:
         raise MediaError("Не удалось отрендерить клип: " + "".join(tail)[-600:])
 
     if on_progress:

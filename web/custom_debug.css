@@ -78,7 +78,7 @@
   bottom: 20px;
   z-index: 40;
   width: min(580px, calc(100vw - 320px));
-  max-height: min(72vh, 540px);
+  max-height: min(82vh, 640px);
   display: flex;
   flex-direction: column;
   border-radius: var(--radius-lg);
@@ -90,15 +90,18 @@
   color: var(--text);
   font-variant-numeric: tabular-nums;
   opacity: 0;
+  visibility: hidden;
   transform: translateY(12px) scale(0.985);
   pointer-events: none;
-  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
+  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease), visibility 0s linear 0.18s;
 }
 
 .vc-dbg-panel.open {
   opacity: 1;
+  visibility: visible;
   transform: translateY(0) scale(1);
   pointer-events: auto;
+  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease), visibility 0s;
 }
 
 .vc-dbg-head {
@@ -193,6 +196,44 @@
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
+}
+
+.vc-dbg-card.vc-dbg-wide {
+  grid-column: 1 / -1;
+}
+
+.vc-dbg-clean-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.vc-dbg-clean-btn {
+  flex: 1 1 180px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.vc-dbg-clean-btn.warn {
+  color: #fde047;
+  border-color: rgba(255, 214, 10, 0.34);
+  background: rgba(255, 214, 10, 0.10);
+}
+
+.vc-dbg-clean-btn.warn:hover:not(:disabled) {
+  background: rgba(255, 214, 10, 0.18);
+  border-color: rgba(255, 214, 10, 0.5);
+}
+
+.vc-dbg-clean-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .vc-dbg-card {
@@ -293,12 +334,44 @@
   font-size: 11.5px;
 }
 
-.vc-dbg-foot {
+.vc-dbg-upd-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--grouped-2);
+  border: 1px solid var(--separator);
+  transition: background 0.14s, color 0.14s, border-color 0.14s;
+}
+
+.vc-dbg-upd-btn:hover {
+  color: var(--text);
+  background: var(--grouped);
+}
+
+.vc-dbg-upd-btn.on {
+  color: #86efac;
+  background: rgba(48, 209, 88, 0.14);
+  border-color: rgba(48, 209, 88, 0.3);
+}
+
+.vc-dbg-upd-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.vc-dbg-panel-foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding: 0 2px;
+  padding: 9px 14px;
+  border-top: 1px solid var(--separator);
   font-size: 10.5px;
   color: var(--muted-2);
 }

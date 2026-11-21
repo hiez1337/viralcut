@@ -13,6 +13,16 @@ from . import utils
 from .config import ASSETS_DIR
 
 _MODEL = ASSETS_DIR / "models" / "yunet.onnx"
+_HAAR_CASCADE = None
+
+
+def _haar_cascade():
+    global _HAAR_CASCADE
+    if _HAAR_CASCADE is None:
+        import cv2
+
+        _HAAR_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    return _HAAR_CASCADE
 
 
 def _make_detector():
@@ -48,7 +58,7 @@ def _detect(detector: Tuple[str, Any], frame) -> List[Dict[str, float]]:
         return out
 
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+    cascade = _haar_cascade()
     faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(24, 24))
     for (x, y, fw, fh) in faces:
         out.append({"cx": x + fw / 2, "cy": y + fh / 2, "w": float(fw), "h": float(fh), "score": 1.0})

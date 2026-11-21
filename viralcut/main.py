@@ -28,6 +28,10 @@ class UpdateSettingsIn(BaseModel):
     enabled: bool = True
 
 
+class CleanupIn(BaseModel):
+    scope: str = "temp"
+
+
 class RetryIn(BaseModel):
     force_hd: bool = False
     prepare_only: bool = False
@@ -92,11 +96,15 @@ app = FastAPI(title="ViralCut", version=__version__, lifespan=_lifespan)
 
 @app.middleware("http")
 async def _static_cache_headers(request, call_next):
-    """Шрифты и статика неизменяемы в пределах сессии — не перекачиваем их каждым опросом."""
+    """Шрифты неизменяемы в пределах сессии, а статика перепроверяется по ETag."""
     response = await call_next(request)
     path = request.url.path
-    if path.startswith(("/fonts/", "/userfonts/", "/static/")):
+    if path.startswith("/fonts/"):
         response.headers.setdefault("Cache-Control", "public, max-age=31536000, immutable")
+    elif path.startswith("/userfonts/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=3600")
+    elif path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 
@@ -164,6 +172,16 @@ def debug_status() -> Dict[str, Any]:
     return custom_debug.snapshot()
 
 
+@app.post("/api/debug/cleanup")
+def debug_cleanup(body: CleanupIn = CleanupIn()) -> Dict[str, Any]:
+    from . import custom_cleanup
+
+    try:
+        return custom_cleanup.run_cleanup(body.scope)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @app.get("/api/update")
 def update_state(force: bool = False) -> Dict[str, Any]:
     """Состояние проверки обновлений; сеть — только в фоне или по force."""
@@ -191,9 +209,17 @@ def fonts() -> List[Dict[str, Any]]:
 
 @app.post("/api/fonts")
 async def font_upload(file: UploadFile = File(...)) -> Dict[str, Any]:
-    data = await file.read()
-    if len(data) > MAX_FONT_BYTES:
-        raise HTTPException(413, "Файл шрифта больше 24 МБ")
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_FONT_BYTES:
+            raise HTTPException(413, "Файл шрифта больше 24 МБ")
+        chunks.append(chunk)
+    data = b"".join(chunks)
     try:
         return custom_fonts.save(file.filename or "font.ttf", data)
     except ValueError as exc:
@@ -329,7 +355,7 @@ async def upload(file: UploadFile = File(...)) -> Dict[str, Any]:
                         "или поднимите VIRALCUT_MAX_UPLOAD_GB",
                     )
                 fh.write(chunk)
-    except HTTPException:
+    except Exception:
         shutil.rmtree(workdir, ignore_errors=True)
         db.delete_project(project["id"])
         raise
@@ -368,12 +394,20 @@ def project_detail(pid: str) -> Dict[str, Any]:
     if preview.exists():
         project["source_url"] = f"/media/{pid}/preview.mp4"
     elif source:
-        try:
-            from urllib.parse import quote
-            rel = Path(source).relative_to(PROJECTS_DIR).as_posix()
-            project["source_url"] = "/media/" + quote(rel)
-        except ValueError:
-            pass
+        src_path = Path(source)
+        audio_only_suffixes = {".mp3", ".m4a", ".wav", ".aac", ".ogg", ".flac"}
+        is_audio_only = (
+            src_path.suffix.lower() in audio_only_suffixes
+            or src_path.name.startswith("audio.")
+            or bool((project.get("meta") or {}).get("segments_mode"))
+        )
+        if not is_audio_only:
+            try:
+                from urllib.parse import quote
+                rel = src_path.relative_to(PROJECTS_DIR).as_posix()
+                project["source_url"] = "/media/" + quote(rel)
+            except ValueError:
+                pass
     return {"project": project, "clips": clips}
 
 
@@ -412,32 +446,35 @@ def project_retry(pid: str, body: RetryIn = RetryIn()) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
-    if jobs.is_running(pid):
-        # текущая обработка ещё останавливается — поставим повтор в очередь
+    running = jobs.is_running(pid)
+    if running:
+        # текущая обработка ещё останавливается — поставим повтор в очередь после отмены
         pipeline.request_cancel(pid)
+    else:
+        pipeline.clear_cancel(pid)
+        db.clear_clips(pid)
     options = dict(project.get("options") or {})
     options["force_hd"] = bool(body.force_hd)
-    pipeline.clear_cancel(pid)
-    db.clear_clips(pid)
     db.update_project(pid, status="queued", stage="В очереди", progress=0, error=None,
                       options=options)
-    if body.prepare_only:
-        jobs.submit_prepare(pid)
-    else:
-        jobs.submit_project(pid)
+    jobs.submit_retry(pid, prepare_only=body.prepare_only)
     return db.get_project(pid) or project
 
 
 @app.delete("/api/projects/{pid}")
 def project_delete(pid: str) -> Dict[str, Any]:
-    if not db.get_project(pid):
+    project = db.get_project(pid)
+    if not project:
         raise HTTPException(404, "Проект не найден")
     from . import live
 
     # Сначала гасим запись/рендер и даём потокам увидеть отмену: иначе ffmpeg
     # продолжает писать в папку, которую мы сейчас удаляем.
-    live.stop_stream(pid)
-    pipeline.request_cancel(pid)
+    jobs.cancel_pending(pid)
+    if (project.get("meta") or {}).get("live"):
+        live.stop_stream(pid)
+    if jobs.is_running(pid):
+        pipeline.request_cancel(pid)
     db.delete_project(pid)
     pipeline.delete_project_files(pid)
     return {"ok": True}
@@ -470,14 +507,26 @@ def clip_rerender(cid: str, body: ClipEdit) -> Dict[str, Any]:
     if not clip:
         raise HTTPException(404, "Клип не найден")
     project = db.get_project(clip["project_id"])
-    if project and not project.get("source"):
+    if not project:
+        raise HTTPException(404, "Проект не найден")
+    payload = _clean_clip_edit(body)
+    new_start = float(payload.get("start", clip["start"]))
+    new_end = float(payload.get("end", clip["end"]))
+    if new_end - new_start < 3.0:
+        raise HTTPException(400, "Длина клипа должна быть не меньше 3 секунд")
+    is_segments = bool((clip.get("settings") or {}).get("segments"))
+    if is_segments:
+        if not str(project.get("url") or "").startswith(("http://", "https://")):
+            raise HTTPException(400, "Нельзя перерендерить экономный клип без ссылки на исходное видео")
+    elif not project.get("source"):
         # клип из прямого эфира: режем из записанных сегментов
         if not (PROJECTS_DIR / project["id"] / "segments" / "times.jsonl").exists():
             raise HTTPException(400, "Запись эфира не найдена — перерендер невозможен")
         recorded = float((project.get("meta") or {}).get("live_duration") or 0)
-        if body.end and recorded and body.end > recorded + 0.5:
+        if new_end and recorded and new_end > recorded + 0.5:
             raise HTTPException(400, "Конец клипа выходит за пределы записанной части эфира")
-    payload = _clean_clip_edit(body)
+    elif not Path(str(project["source"])).exists():
+        raise HTTPException(400, "Исходное видео не найдено на диске — перерендер невозможен")
     jobs.submit_rerender(cid, payload)
     return {"ok": True, "clip": db.get_clip(cid)}
 

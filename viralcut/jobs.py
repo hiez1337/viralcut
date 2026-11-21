@@ -11,7 +11,6 @@ from .config import MAX_WORKERS
 
 _project_pool = ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS), thread_name_prefix="project")
 _clip_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip")
-_lock = threading.Lock()
 
 # Каждый эфир — отдельный поток. Раньше стримы шли через пул на 3 места, и
 # несколько «ждущих эфир» записей навсегда занимали очередь: следующая запись
@@ -53,7 +52,13 @@ def _mark(pid: str, delta: int) -> None:
             _running[pid] = count
 
 
-def _guarded(pid: str, target) -> None:
+def cancel_pending(pid: str) -> None:
+    """Убрать отложенную задачу проекта (например, при удалении)."""
+    with _running_lock:
+        _pending.pop(pid, None)
+
+
+def _guarded(pid: str, target, *, reset_cancel: bool = False) -> None:
     """Запускает задачу, если для проекта ещё нет активной обработки.
 
     Если обработка уже идёт (например, пользователь нажал «повторить» во время
@@ -62,12 +67,14 @@ def _guarded(pid: str, target) -> None:
     """
     with _running_lock:
         if _running.get(pid):
-            _pending[pid] = target
+            _pending[pid] = (target, reset_cancel)
             return
         _running[pid] = 1
 
     def work() -> None:
         try:
+            if reset_cancel:
+                pipeline.clear_cancel(pid)
             target()
         except Exception as exc:  # noqa: BLE001
             db.update_project(pid, status="error", error=str(exc)[:600], stage="Ошибка")
@@ -76,13 +83,25 @@ def _guarded(pid: str, target) -> None:
                 _running.pop(pid, None)
                 nxt = _pending.pop(pid, None)
             if nxt is not None:
-                _guarded(pid, nxt)
+                nxt_target, nxt_reset = nxt
+                _guarded(pid, nxt_target, reset_cancel=nxt_reset)
 
     _project_pool.submit(work)
 
 
 def submit_project(pid: str) -> None:
     _guarded(pid, lambda: pipeline.run_project(pid))
+
+
+def submit_retry(pid: str, *, prepare_only: bool = False) -> None:
+    def _run() -> None:
+        db.clear_clips(pid)
+        if prepare_only:
+            pipeline.prepare_project(pid)
+        else:
+            pipeline.run_project(pid)
+
+    _guarded(pid, _run, reset_cancel=True)
 
 
 def submit_stream(pid: str, options: dict) -> None:

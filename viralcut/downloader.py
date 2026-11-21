@@ -494,6 +494,8 @@ def download_file(url: str, dest_dir: Path, progress: ProgressCb = None) -> Dict
                 got += len(chunk)
                 if progress and total:
                     progress(min(got / total, 0.99), f"Скачивание {got/total*100:.0f}%")
+    except Cancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         raise DownloadError(f"Не удалось скачать файл по ссылке: {exc}") from exc
     return {"path": path, "title": Path(url.split("?")[0]).name or "video", "duration": None,
@@ -742,18 +744,21 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
             opts["js_runtimes"] = {"node": {"path": os.environ["VIRALCUT_NODE"]}}
     opts.update(_cookie_opts(browser))
     info = None
-    for reconnect in range(2):
-        try:
-            if progress:
-                progress(0.01, "Скачивание аудио")
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-            break
-        except StalledDownload:
-            if reconnect == 1:
-                raise
-            if progress:
-                progress(0.01, "Скорость упала · переподключаюсь к источнику…")
+    try:
+        for reconnect in range(2):
+            try:
+                if progress:
+                    progress(0.01, "Скачивание аудио")
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                break
+            except StalledDownload:
+                if reconnect == 1:
+                    raise
+                if progress:
+                    progress(0.01, "Скорость упала · переподключаюсь к источнику…")
+    finally:
+        custom_debug.record_download(active=False, kind="audio")
     if info and "entries" in info:
         entries = [e for e in info["entries"] if e]
         info = entries[0] if entries else info

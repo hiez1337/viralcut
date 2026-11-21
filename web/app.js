@@ -229,6 +229,7 @@ const state = {
   projects: [],
   current: null,
   detail: null,
+  detailSeq: 0,
   pollTimer: null,
   mainKey: "",
   health: null,
@@ -240,6 +241,9 @@ const state = {
   tmplTimer: null,
   tmplAnim: null,
   tmplDetail: null,
+  tmplDirty: false,
+  tmplHydrated: false,
+  tmplRO: null,
   opts: {
     count: 10,
     dur: "20-45",
@@ -281,6 +285,23 @@ function toast(text, kind) {
   node.textContent = text;
   $("#toasts").appendChild(node);
   setTimeout(() => node.remove(), 4200);
+}
+
+function releaseVideos(root) {
+  if (!root) return;
+  $$("video", root).forEach((v) => {
+    try {
+      v.pause();
+      v.removeAttribute("src");
+      v.load();
+    } catch (_) {}
+  });
+}
+
+function closeAnyModal() {
+  if (state.probeOpen) closeProbe();
+  else if (state.tmplPid) closeTemplate(true);
+  else if (!$("#modal").classList.contains("hidden")) closeModal();
 }
 
 /* ---------------- Sidebar ---------------- */
@@ -410,7 +431,7 @@ function heroHTML() {
               ${SUB_SPEEDS.map(([k, label]) => `<button data-val="${k}" class="${o.subSpeed === k ? "active" : ""}">${label}</button>`).join("")}
             </div>
           </label>
-          <div class="font-sample" id="fontSample" style="font-family:${FONT_CSS[o.subFont] || "VCMontserrat"}">ПРИМЕР СУБТИТРОВ</div>
+          <div class="font-sample" id="fontSample" style="font-family:${FONT_CSS[o.subFont] || "VCMontserrat"};--hl:${ACCENT_HEX[o.accent] || ACCENT_HEX.yellow}">ПРИМЕР <span class="hl">СУБТИТРОВ</span></div>
         </div>
       </div>
       <div class="opt">
@@ -456,6 +477,7 @@ function bindHero() {
       if (!btn) return;
       state.opts.accent = btn.dataset.val;
       $$(".swatch", accents).forEach((b) => b.classList.toggle("active", b === btn));
+      $("#fontSample")?.style.setProperty("--hl", ACCENT_HEX[state.opts.accent] || ACCENT_HEX.yellow);
     });
   }
   const subs = $("#subsToggle");
@@ -539,8 +561,10 @@ function closeProbe() {
   state.probeOpen = false;
   state.probeUrl = "";
   state.probeData = null;
-  $("#modal").classList.add("hidden");
-  $("#modal").innerHTML = "";
+  const modal = $("#modal");
+  releaseVideos(modal);
+  modal.classList.add("hidden");
+  modal.innerHTML = "";
   const btn = $("#startBtn");
   if (btn) { btn.disabled = false; btn.textContent = "Сделать нарезки"; }
 }
@@ -674,11 +698,13 @@ function openProject(id) {
     state.current = id;
     state.detail = null;
     state.mainKey = "";
+    clearTimeout(state.pollTimer);
     history.replaceState(null, "", "#" + id);
   }
   renderSidebar();
-  loadDetail(true);
-  schedulePoll(80);
+  loadDetail(true).then((detail) => {
+    if (state.current === id && isBusy(detail)) schedulePoll(1300);
+  });
 }
 
 function schedulePoll(delay) {
@@ -694,9 +720,12 @@ function isBusy(detail) {
 }
 
 async function loadDetail(force) {
-  if (!state.current) return;
+  if (!state.current) return null;
+  const pid = state.current;
+  const seq = ++state.detailSeq;
   try {
-    const detail = await api(`/api/projects/${state.current}`);
+    const detail = await api(`/api/projects/${pid}`);
+    if (seq !== state.detailSeq || state.current !== pid) return null;
     state.detail = detail;
     const item = state.projects.find((p) => p.id === detail.project.id);
     if (item) {
@@ -715,17 +744,20 @@ async function loadDetail(force) {
     renderMain(force);
     return detail;
   } catch (e) {
-    if (String(e.message).includes("не найден")) {
+    if (seq === state.detailSeq && state.current === pid && String(e.message).includes("не найден")) {
       state.current = null;
       history.replaceState(null, "", location.pathname);
       renderMain(true);
     }
+    return null;
   }
 }
 
 async function poll() {
   if (!state.current) return;
+  const pid = state.current;
   const detail = await loadDetail(false);
+  if (state.current !== pid) return;
   if (isBusy(detail)) schedulePoll(1300);
   else if (detail) {
     loadProjects();
@@ -857,9 +889,10 @@ function clipsGridHTML() {
     const dur = Math.max(0, (c.end || 0) - (c.start || 0));
     const score = Math.round((c.score || 0) * 100);
     const p = project.id;
-    const url = `/media/${p}/clips/clip_${String(c.idx + 1).padStart(2, "0")}.mp4?v=${Math.round(c.updated_at || 0)}`;
-    const preview = c.has_preview ? `/media/${p}/previews/${c.id}.mp4?v=${Math.round(c.updated_at || 0)}` : url;
-    const thumb = c.thumb ? `/media/${p}/thumbs/${c.id}.jpg` : "";
+    const ver = Math.round(c.updated_at || 0);
+    const url = `/media/${p}/clips/clip_${String(c.idx + 1).padStart(2, "0")}.mp4?v=${ver}`;
+    const preview = c.has_preview ? `/media/${p}/previews/${c.id}.mp4?v=${ver}` : url;
+    const thumb = c.thumb ? `/media/${p}/thumbs/${c.id}.jpg?v=${ver}` : "";
     const wide = (c.settings?.aspect || "9:16") === "16:9" ? " wide" : (c.settings?.aspect || "") === "1:1" ? " square" : "";
     const sp = c.settings?.score_parts || null;
     const partsLine = sp ? [
@@ -883,13 +916,13 @@ function clipsGridHTML() {
     }
     return `<div class="clip-card${wide}" data-clip="${c.id}">
       <div class="clip-media" data-action="edit">
-        <video src="${preview}#t=0.1" ${thumb ? `poster="${thumb}"` : ""} muted loop playsinline preload="metadata"></video>
+        <video src="${preview}#t=0.1" ${thumb ? `poster="${thumb}"` : ""} muted loop playsinline preload="${thumb ? "none" : "metadata"}"></video>
         <div class="play-hint">${ICONS.play}</div>
         <div class="score-badge ${score >= 70 ? "hot" : ""}" title="Оценка момента по структуре речи, а не прогноз просмотров">⚡ ${score}</div>
         <div class="dur-badge">${fmtDur(dur)}</div>
         <div class="clip-quick">
           <button class="glass-btn" data-action="copy" title="Копировать подпись">${ICONS.copy}</button>
-          ${c.settings && c.settings.segments ? "" : `<button class="glass-btn" data-action="edit" title="Редактировать">${ICONS.edit}</button>`}
+          <button class="glass-btn" data-action="edit" title="Редактировать">${ICONS.edit}</button>
         </div>
       </div>
       <div class="clip-body">
@@ -1065,6 +1098,7 @@ function renderMain(force) {
   const main = $("#main");
   if (!state.current || !state.detail) {
     if (!state.current) {
+      releaseVideos(main);
       main.innerHTML = heroHTML();
       bindHero();
       state.mainKey = "hero";
@@ -1075,10 +1109,11 @@ function renderMain(force) {
   const clips = state.detail.clips;
   const running = ["queued", "running", "preparing", "processing"].includes(project.status);
   const key = `${project.id}:${project.status}:${clips.length}:${clips.map((c) => c.status).join("")}`;
-  if (!force && running && state.mainKey === key) {
-    updateProgress(project);
+  if (!force && state.mainKey === key) {
+    if (running) updateProgress(project);
     return;
   }
+  releaseVideos(main);
   state.mainKey = key;
   if (running) {
     main.innerHTML = (project.meta && project.meta.live) ? streamHTML(project) : runningHTML(project);
@@ -1163,6 +1198,7 @@ $("#main").addEventListener("click", async (e) => {
   const action = actionEl.dataset.action;
 
   if (action === "home") {
+    closeAnyModal();
     state.current = null;
     state.detail = null;
     state.mainKey = "";
@@ -1270,8 +1306,10 @@ $("#main").addEventListener("click", async (e) => {
     if (!state.detail) return;
     if (!confirm("Удалить проект и все клипы? Файлы будут стёрты с диска.")) return;
     try {
-      await api(`/api/projects/${state.detail.project.id}`, { method: "DELETE" });
-      state.projects = state.projects.filter((p) => p.id !== state.detail.project.id);
+      const deletedId = state.detail.project.id;
+      await api(`/api/projects/${deletedId}`, { method: "DELETE" });
+      closeAnyModal();
+      state.projects = state.projects.filter((p) => p.id !== deletedId);
       state.current = null;
       state.detail = null;
       state.mainKey = "";
@@ -1341,6 +1379,7 @@ function updateTemplatePreview() {
   const pos = $("#tpPos").value;
   const offset = Number($("#tpOffset").value);
   const upper = $("#tpUpper").checked;
+  const showHook = $("#tpHook").checked;
   const accent = state.tmplAccent || "yellow";
   const width = stage.clientWidth || 340;
   const px = Math.max(10, Math.round(size * 0.45 * (width / 1080)));
@@ -1362,6 +1401,15 @@ function updateTemplatePreview() {
     cap.style.top = "auto";
     cap.style.bottom = `calc(${17.7 + offsetPct}%)`;
     cap.style.transform = "";
+  }
+  const hook = $("#tmplHook");
+  if (hook) {
+    const hookPx = Math.max(9, Math.round(96 * 0.42 * (width / 1080)));
+    hook.style.fontFamily = FONT_CSS[font] || "VCMontserrat";
+    hook.style.fontSize = hookPx + "px";
+    hook.style.textTransform = upper ? "uppercase" : "none";
+    hook.classList.toggle("hidden", !showHook);
+    hook.classList.toggle("at-bottom", pos === "top");
   }
   $("#tpSizeVal").textContent = size;
   $("#tpOffsetVal").textContent = offset;
@@ -1388,6 +1436,7 @@ function applyPreset(key) {
   const preset = STYLE_PRESETS.find((p) => p.key === key);
   if (!preset || !state.tmplDetail) return;
   const t = preset.opts;
+  state.tmplDirty = true;
   $("#tpFont").value = t.subFont;
   $("#tpSize").value = t.subSize;
   $("#tpPos").value = t.subPos;
@@ -1401,23 +1450,39 @@ function applyPreset(key) {
 function closeTemplate(keepProject) {
   clearTimeout(state.tmplTimer);
   clearInterval(state.tmplAnim);
+  if (state.tmplRO) {
+    state.tmplRO.disconnect();
+    state.tmplRO = null;
+  }
   state.tmplTimer = null;
   state.tmplAnim = null;
   state.tmplPid = null;
   state.tmplDetail = null;
-  $("#modal").classList.add("hidden");
-  $("#modal").innerHTML = "";
+  state.tmplDirty = false;
+  state.tmplHydrated = false;
+  const modal = $("#modal");
+  releaseVideos(modal);
+  modal.classList.add("hidden");
+  modal.innerHTML = "";
   if (!keepProject) renderSidebar();
 }
 
 function openTemplate(pid) {
   if (state.tmplPid === pid) return;
   clearTimeout(state.tmplTimer);
+  clearInterval(state.tmplAnim);
+  if (state.tmplRO) {
+    state.tmplRO.disconnect();
+    state.tmplRO = null;
+  }
   state.tmplPid = pid;
   state.tmplDetail = null;
-  clearInterval(state.tmplAnim);
+  state.tmplDirty = false;
+  state.tmplHydrated = false;
   state.tmplAccent = "yellow";
   state.tmplReady = false;
+  const initAspect = (((state.detail?.project?.id === pid && state.detail?.project?.options?.aspect) || state.opts.aspect || "9:16")).replace(":", " / ");
+  const initSpeed = state.opts.subSpeed || "calm";
 
   $("#modal").innerHTML = `
     <div class="modal-backdrop" data-close="tmpl"></div>
@@ -1428,8 +1493,9 @@ function openTemplate(pid) {
       </div>
       <div class="tmpl-body">
         <div class="tmpl-left">
-          <div class="tmpl-stage" id="tmplStage">
+          <div class="tmpl-stage" id="tmplStage" style="aspect-ratio:${initAspect}">
             <video id="tmplVideo" muted loop playsinline></video>
+            <div class="tmpl-hook" id="tmplHook">ЗАГОЛОВОК КЛИПА</div>
             <div class="tmpl-caption" id="tmplCaption"><span class="w hl">ПРИМЕР</span> <span class="w">СУБТИТРОВ</span></div>
             <div class="tmpl-veil" id="tmplVeil">
               <span class="spinner"></span>
@@ -1437,7 +1503,7 @@ function openTemplate(pid) {
               <div class="tmpl-bar"><i id="tmplBar" style="width:2%"></i></div>
             </div>
           </div>
-          <div class="tmpl-hint">Так будет выглядеть вертикальный кадр. Видео можно поставить на паузу.</div>
+          <div class="tmpl-hint">Так будет выглядеть вертикальный кадр. Нажмите на видео для паузы.</div>
         </div>
         <div class="tmpl-right">
           <div class="field">
@@ -1476,7 +1542,7 @@ function openTemplate(pid) {
           <div class="field">
             <label>Темп субтитров</label>
             <div class="seg" id="tpSpeed">
-              ${SUB_SPEEDS.map(([k, label]) => `<button data-val="${k}" class="active">${label}</button>`).join("")}
+              ${SUB_SPEEDS.map(([k, label]) => `<button data-val="${k}" class="${k === initSpeed ? "active" : ""}">${label}</button>`).join("")}
             </div>
           </div>
           <div class="field">
@@ -1504,7 +1570,32 @@ function openTemplate(pid) {
   $("#modal").classList.remove("hidden");
   updateTemplatePreview();
 
-  $("#tpFont").addEventListener("change", updateTemplatePreview);
+  const tmplStage = $("#tmplStage");
+  if (tmplStage) {
+    tmplStage.addEventListener("click", (e) => {
+      if (e.target.closest("#tmplVeil, button")) return;
+      const v = $("#tmplVideo");
+      if (!v || !v.getAttribute("src")) return;
+      if (v.paused) {
+        v.play().catch(() => {});
+        tmplStage.classList.remove("paused");
+      } else {
+        v.pause();
+        tmplStage.classList.add("paused");
+      }
+    });
+    if (typeof ResizeObserver === "function") {
+      state.tmplRO = new ResizeObserver(() => updateTemplatePreview());
+      state.tmplRO.observe(tmplStage);
+    }
+  }
+
+  const markDirtyAndPreview = () => {
+    state.tmplDirty = true;
+    updateTemplatePreview();
+  };
+
+  $("#tpFont").addEventListener("change", markDirtyAndPreview);
   const tpFontAdd = $("#tpFontAdd");
   if (tpFontAdd) tpFontAdd.addEventListener("click", () => {
     state.fontTarget = "#tpFont";
@@ -1513,16 +1604,19 @@ function openTemplate(pid) {
   $("#tpSpeed").addEventListener("click", (e) => {
     const btn = e.target.closest("button[data-val]");
     if (!btn) return;
+    state.tmplDirty = true;
     $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b === btn));
     startCaptionPreview();
   });
-  $("#tpSize").addEventListener("input", updateTemplatePreview);
-  $("#tpPos").addEventListener("change", updateTemplatePreview);
-  $("#tpOffset").addEventListener("input", updateTemplatePreview);
-  $("#tpUpper").addEventListener("change", updateTemplatePreview);
+  $("#tpSize").addEventListener("input", markDirtyAndPreview);
+  $("#tpPos").addEventListener("change", markDirtyAndPreview);
+  $("#tpOffset").addEventListener("input", markDirtyAndPreview);
+  $("#tpUpper").addEventListener("change", markDirtyAndPreview);
+  $("#tpHook").addEventListener("change", markDirtyAndPreview);
   $("#tpAccents").addEventListener("click", (e) => {
     const b = e.target.closest(".swatch");
     if (!b) return;
+    state.tmplDirty = true;
     state.tmplAccent = b.dataset.val;
     $$("#tpAccents .swatch").forEach((x) => x.classList.toggle("active", x === b));
     updateTemplatePreview();
@@ -1538,8 +1632,10 @@ function openTemplate(pid) {
 
 async function tmplPoll() {
   if (!state.tmplPid) return;
+  const pid = state.tmplPid;
   try {
-    const detail = await api(`/api/projects/${state.tmplPid}`);
+    const detail = await api(`/api/projects/${pid}`);
+    if (state.tmplPid !== pid) return;
     state.tmplDetail = detail;
     const project = detail.project;
     const veil = $("#tmplVeil");
@@ -1559,27 +1655,50 @@ async function tmplPoll() {
         <button class="btn-ghost" id="tmplRetry">Повторить загрузку</button>`;
       $("#tmplRetry").addEventListener("click", async () => {
         await api(`/api/projects/${project.id}/retry`, { method: "POST", body: JSON.stringify({ force_hd: false, prepare_only: true }) });
+        state.tmplPid = null;
         openTemplate(project.id);
       });
       return;
     }
     if (project.status === "review") {
-      const defaults = templateDefaults(project);
-      $("#tpFont").value = defaults.font;
-      $("#tpSize").value = defaults.size;
-      $("#tpPos").value = defaults.pos;
-      $("#tpOffset").value = defaults.offset;
-      $("#tpUpper").checked = defaults.uppercase;
-      $("#tpHook").checked = defaults.showHook;
-      $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.speed));
-      state.tmplAccent = defaults.accent;
-      $$("#tpAccents .swatch").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.accent));
-      updateTemplatePreview();
+      const stage = $("#tmplStage");
+      const asp = (project.options && project.options.aspect) || state.opts.aspect || "9:16";
+      if (stage) stage.style.aspectRatio = asp.replace(":", " / ");
+
+      if (!state.tmplHydrated && !state.tmplDirty) {
+        const defaults = templateDefaults(project);
+        $("#tpFont").value = defaults.font;
+        $("#tpSize").value = defaults.size;
+        $("#tpPos").value = defaults.pos;
+        $("#tpOffset").value = defaults.offset;
+        $("#tpUpper").checked = defaults.uppercase;
+        $("#tpHook").checked = defaults.showHook;
+        $$("#tpSpeed button").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.speed));
+        state.tmplAccent = defaults.accent;
+        $$("#tpAccents .swatch").forEach((b) => b.classList.toggle("active", b.dataset.val === defaults.accent));
+        updateTemplatePreview();
+      } else {
+        updateTemplatePreview();
+      }
+      state.tmplHydrated = true;
 
       const video = $("#tmplVideo");
-      if (project.source_url && video.getAttribute("src") !== project.source_url) {
-        video.setAttribute("src", project.source_url);
-        video.play().catch(() => {});
+      const existingNoVideo = stage ? $(".tmpl-no-video", stage) : null;
+      if (project.source_url) {
+        if (existingNoVideo) existingNoVideo.remove();
+        if (video.getAttribute("src") !== project.source_url) {
+          video.setAttribute("src", project.source_url);
+          video.play().catch(() => {});
+          if (stage) stage.classList.remove("paused");
+        }
+      } else {
+        video.removeAttribute("src");
+        if (stage && !existingNoVideo) {
+          const note = document.createElement("div");
+          note.className = "tmpl-no-video";
+          note.textContent = "Предпросмотр недоступен — настройте шаблон по макету";
+          stage.insertBefore(note, $("#tmplHook"));
+        }
       }
       veil.classList.add("hidden");
       $("#tmplStart").disabled = false;
@@ -1597,7 +1716,9 @@ async function tmplPoll() {
       openProject(project.id);
     }
   } catch (err) {
-    state.tmplTimer = setTimeout(tmplPoll, 1500);
+    if (state.tmplPid === pid) {
+      state.tmplTimer = setTimeout(tmplPoll, 1500);
+    }
   }
 }
 
@@ -1794,7 +1915,10 @@ function openEditor(clipId) {
   start.addEventListener("input", () => {
     if (Number(start.value) > Number(end.value) - 3) start.value = Math.max(0, Number(end.value) - 3);
     syncNumbers();
-    try { video.currentTime = Number(start.value); } catch (_) {}
+    const rel = Math.max(0, Number(start.value) - Number(clip.start || 0));
+    try {
+      video.currentTime = Number.isFinite(video.duration) ? Math.min(video.duration, rel) : rel;
+    } catch (_) {}
   });
   end.addEventListener("input", () => {
     if (Number(end.value) < Number(start.value) + 3) end.value = Math.min(maxT, Number(start.value) + 3);
@@ -1844,8 +1968,10 @@ function openEditor(clipId) {
 }
 
 function closeModal() {
-  $("#modal").classList.add("hidden");
-  $("#modal").innerHTML = "";
+  const modal = $("#modal");
+  releaseVideos(modal);
+  modal.classList.add("hidden");
+  modal.innerHTML = "";
 }
 
 $("#modal").addEventListener("click", (e) => {
@@ -1864,6 +1990,7 @@ document.addEventListener("keydown", (e) => {
 /* ---------------- Boot ---------------- */
 
 $("#newBtn").addEventListener("click", () => {
+  closeAnyModal();
   state.current = null;
   state.detail = null;
   state.mainKey = "";
@@ -1877,6 +2004,7 @@ $("#newBtn").addEventListener("click", () => {
 });
 
 $("#streamBtn")?.addEventListener("click", () => {
+  closeAnyModal();
   state.current = null;
   state.detail = null;
   state.homeView = "streams";
@@ -1990,8 +2118,10 @@ function bindUpdateCard() {
 window.addEventListener("hashchange", () => {
   const id = location.hash.replace("#", "");
   if (id && id !== state.current) {
+    closeAnyModal();
     openProject(id);
   } else if (!id && state.current) {
+    closeAnyModal();
     state.current = null;
     state.detail = null;
     state.mainKey = "";
@@ -2004,7 +2134,7 @@ window.addEventListener("hashchange", () => {
 (async function boot() {
   bindUpdateCard();
   checkUpdates();
-  setInterval(checkUpdates, 30 * 60 * 1000);
+  setInterval(() => { if (document.visibilityState === "visible") checkUpdates(); }, 30 * 60 * 1000);
   await checkHealth();
   await loadFontCatalog();
   await loadProjects();
@@ -2014,5 +2144,5 @@ window.addEventListener("hashchange", () => {
   } else {
     renderMain(true);
   }
-  setInterval(checkHealth, 20000);
+  setInterval(() => { if (document.visibilityState === "visible") checkHealth(); }, 20000);
 })();

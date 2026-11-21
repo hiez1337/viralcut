@@ -72,16 +72,17 @@ def _load() -> Dict[str, Any]:
 def _save(state: Dict[str, Any]) -> None:
     try:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp = STATE_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(STATE_FILE)
     except OSError:
         pass
 
 
 def enabled() -> bool:
-    state = _load()
-    if isinstance(state.get("enabled"), bool):
-        return bool(state["enabled"]) and _env_enabled()
-    return _env_enabled()
+    from .custom_updater import resolve_update_enabled
+
+    return resolve_update_enabled(_load())
 
 
 def set_enabled(flag: bool) -> Dict[str, Any]:

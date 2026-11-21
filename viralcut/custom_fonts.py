@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,6 +17,7 @@ CUSTOM_DIR = DATA_DIR / "fonts"
 RUNTIME_DIR = DATA_DIR / "fonts_runtime"
 META_PATH = CUSTOM_DIR / "fonts.json"
 MAX_BYTES = 30 * 1024 * 1024
+_SYNC_LOCK = threading.Lock()
 
 LOWER = "аеоинтсврлкмдупя"
 
@@ -53,33 +55,50 @@ def payload() -> List[Dict[str, Any]]:
 
 
 def sync() -> Path:
-    """Собирает папку со всеми шрифтами (симлинки) для libass."""
-    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
-    expected: Dict[str, Path] = {}
-    for path in sorted(FONTS_DIR.glob("*.ttf")):
-        expected[path.name] = path
-    for font in list_custom():
-        expected[font["file"]] = CUSTOM_DIR / font["file"]
-    for existing in RUNTIME_DIR.iterdir():
-        if existing.name not in expected:
+    """Собирает папку со всеми шрифтами (симлинки или копии) для libass потокобезопасно."""
+    with _SYNC_LOCK:
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        expected: Dict[str, Path] = {}
+        for path in sorted(FONTS_DIR.glob("*.ttf")):
+            expected[path.name] = path
+        for font in list_custom():
+            expected[font["file"]] = CUSTOM_DIR / font["file"]
+        for existing in RUNTIME_DIR.iterdir():
+            if existing.name not in expected:
+                try:
+                    existing.unlink()
+                except OSError:
+                    pass
+        for name, src in expected.items():
+            link = RUNTIME_DIR / name
             try:
-                existing.unlink()
+                if link.is_symlink() and Path(os.readlink(link)) == src:
+                    continue
+                if link.is_file() and not link.is_symlink():
+                    src_st = src.stat()
+                    dst_st = link.stat()
+                    if dst_st.st_size == src_st.st_size and int(dst_st.st_mtime) == int(src_st.st_mtime):
+                        continue
+                if link.exists() or link.is_symlink():
+                    link.unlink()
             except OSError:
                 pass
-    for name, src in expected.items():
-        link = RUNTIME_DIR / name
-        try:
-            if link.is_symlink() and Path(os.readlink(link)) == src:
-                continue
-            if link.exists() or link.is_symlink():
-                link.unlink()
-        except OSError:
-            pass
-        try:
-            link.symlink_to(src)
-        except OSError:
-            shutil.copy2(src, link)
-    return RUNTIME_DIR
+            try:
+                link.symlink_to(src)
+            except OSError:
+                tmp = RUNTIME_DIR / f".{name}.{os.getpid()}.{threading.get_ident()}.tmp"
+                try:
+                    shutil.copy2(src, tmp)
+                    tmp.replace(link)
+                except PermissionError:
+                    if not (link.is_file() and link.stat().st_size == src.stat().st_size):
+                        raise
+                finally:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+        return RUNTIME_DIR
 
 
 def libass_dir() -> Path:
@@ -102,36 +121,36 @@ def _clean_family(name: str | None) -> str:
 def _metrics(data: bytes) -> Dict[str, Any]:
     from fontTools.ttLib import TTFont
 
-    font = TTFont(io.BytesIO(data))
-    upem = int(font["head"].unitsPerEm) or 1000
-    family = None
-    try:
-        record = font["name"].getDebugName(16) or font["name"].getDebugName(1)
-        family = str(record).strip() if record else None
-    except Exception:
+    with TTFont(io.BytesIO(data)) as font:
+        upem = int(font["head"].unitsPerEm) or 1000
         family = None
-    cap = 0.0
-    try:
-        cap = float(getattr(font["OS/2"], "sCapHeight", 0) or 0) / upem
-    except Exception:
-        cap = 0.0
-    if cap <= 0:
         try:
-            glyph = font["glyf"]["H"]
-            cap = float(glyph.yMax - glyph.yMin) / upem
+            record = font["name"].getDebugName(16) or font["name"].getDebugName(1)
+            family = str(record).strip() if record else None
         except Exception:
-            cap = 0.7
-    cmap = font.getBestCmap() or {}
-    hmtx = font["hmtx"]
-    widths = [hmtx[cmap[ord(ch)]][0] for ch in LOWER if ord(ch) in cmap]
-    raw = (sum(widths) / len(widths) / upem) if widths else 0.6
-    cyrillic = all(ord(ch) in cmap for ch in "АЯая")
-    return {
-        "family": _clean_family(family),
-        "cap": round(max(0.3, min(1.4, cap)), 3),
-        "avg": round(max(0.3, min(2.4, raw * 1.75)), 3),
-        "has_cyrillic": bool(cyrillic),
-    }
+            family = None
+        cap = 0.0
+        try:
+            cap = float(getattr(font["OS/2"], "sCapHeight", 0) or 0) / upem
+        except Exception:
+            cap = 0.0
+        if cap <= 0:
+            try:
+                glyph = font["glyf"]["H"]
+                cap = float(glyph.yMax - glyph.yMin) / upem
+            except Exception:
+                cap = 0.7
+        cmap = font.getBestCmap() or {}
+        hmtx = font["hmtx"]
+        widths = [hmtx[cmap[ord(ch)]][0] for ch in LOWER if ord(ch) in cmap]
+        raw = (sum(widths) / len(widths) / upem) if widths else 0.6
+        cyrillic = all(ord(ch) in cmap for ch in "АЯая")
+        return {
+            "family": _clean_family(family),
+            "cap": round(max(0.3, min(1.4, cap)), 3),
+            "avg": round(max(0.3, min(2.4, raw * 1.75)), 3),
+            "has_cyrillic": bool(cyrillic),
+        }
 
 
 def _suffix(filename: str, data: bytes) -> str:

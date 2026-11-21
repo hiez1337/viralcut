@@ -566,8 +566,9 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                 failures = 0
                 time.sleep(1)
                 continue
+            finally:
+                audio.unlink(missing_ok=True)
             failures = 0
-            audio.unlink(missing_ok=True)
 
             settings = _settings(opts)
             ready_count = int(meta.get("live_clips") or 0)
@@ -664,41 +665,49 @@ _STOP_EVENTS: Dict[str, threading.Event] = {}
 
 def stop_stream(pid: str) -> None:
     event = _STOP_EVENTS.get(pid)
-    if event is None:
-        event = _STOP_EVENTS.setdefault(pid, threading.Event())
-    event.set()
+    if event is not None:
+        event.set()
+        return
+    project = db.get_project(pid)
+    if project and (project.get("meta") or {}).get("live"):
+        _STOP_EVENTS.setdefault(pid, threading.Event()).set()
 
 
 def run_stream(pid: str, options: Dict[str, Any]) -> None:
     stop = _STOP_EVENTS.setdefault(pid, threading.Event())
-    recorder = Recorder(pid, db.get_project(pid)["url"], stop, options.get("cookies_browser") or None)
-    record_thread = threading.Thread(target=recorder.run, name=f"live-rec-{pid}", daemon=True)
-    process_thread = threading.Thread(target=process_windows, args=(pid, options, stop),
-                                      name=f"live-proc-{pid}", daemon=True)
-    record_thread.start()
-    process_thread.start()
-    interrupted = False
-    while not stop.is_set() and record_thread.is_alive():
-        if not process_thread.is_alive():
-            # без нарезчика запись бессмысленна — не пишем диск впустую
-            interrupted = True
-            break
-        time.sleep(1)
-    stop.set()
-    record_thread.join(timeout=5)
-    # дожидаемся, пока последние окна дойдут до готовых клипов
-    process_thread.join()
-    project = db.get_project(pid) or {}
-    meta = project.get("meta") or {}
-    if interrupted:
-        db.update_project(pid, status="error",
-                          stage="Нарезка остановлена · запись прервана",
-                          error=project.get("error") or "Обработка клипов остановилась.")
-    elif project.get("status") == "cancelled":
-        db.update_project(pid, stage="Отменено")
-    elif meta.get("live_status") == "offline" and not int(meta.get("live_clips") or 0):
-        db.update_project(pid, status="done", stage="Запись остановлена · эфира не было")
-    else:
-        db.update_project(pid, status="done",
-                          stage=f"Запись завершена · клипов: {meta.get('live_clips', 0)}")
-    _STOP_EVENTS.pop(pid, None)
+    try:
+        project = db.get_project(pid)
+        if not project:
+            return
+        recorder = Recorder(pid, project["url"], stop, options.get("cookies_browser") or None)
+        record_thread = threading.Thread(target=recorder.run, name=f"live-rec-{pid}", daemon=True)
+        process_thread = threading.Thread(target=process_windows, args=(pid, options, stop),
+                                          name=f"live-proc-{pid}", daemon=True)
+        record_thread.start()
+        process_thread.start()
+        interrupted = False
+        while not stop.is_set() and record_thread.is_alive():
+            if not process_thread.is_alive():
+                # без нарезчика запись бессмысленна — не пишем диск впустую
+                interrupted = True
+                break
+            time.sleep(1)
+        stop.set()
+        record_thread.join(timeout=5)
+        # дожидаемся, пока последние окна дойдут до готовых клипов
+        process_thread.join()
+        project = db.get_project(pid) or {}
+        meta = project.get("meta") or {}
+        if interrupted:
+            db.update_project(pid, status="error",
+                              stage="Нарезка остановлена · запись прервана",
+                              error=project.get("error") or "Обработка клипов остановилась.")
+        elif project.get("status") == "cancelled":
+            db.update_project(pid, stage="Отменено")
+        elif meta.get("live_status") == "offline" and not int(meta.get("live_clips") or 0):
+            db.update_project(pid, status="done", stage="Запись остановлена · эфира не было")
+        else:
+            db.update_project(pid, status="done",
+                              stage=f"Запись завершена · клипов: {meta.get('live_clips', 0)}")
+    finally:
+        _STOP_EVENTS.pop(pid, None)
