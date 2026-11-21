@@ -20,8 +20,10 @@ DB_PATH = DATA_DIR / "viralcut.db"
 PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
+from .custom_whisper import resolve_whisper_model
+
 # Размер модели Whisper: tiny / base / small / medium / large-v3
-WHISPER_MODEL = os.environ.get("VIRALCUT_WHISPER", "small")
+WHISPER_MODEL = resolve_whisper_model()
 WHISPER_LOCAL_DIR = os.environ.get("VIRALCUT_WHISPER_DIR", "")
 WHISPER_DEVICE = os.environ.get("VIRALCUT_DEVICE", "auto")
 WHISPER_COMPUTE = os.environ.get("VIRALCUT_COMPUTE", "int8")
