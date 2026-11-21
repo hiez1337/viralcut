@@ -32,6 +32,18 @@ def is_running(pid: str) -> bool:
         return bool(_running.get(pid))
 
 
+def active_project_ids() -> list[str]:
+    """Вернуть список ID проектов, обрабатываемых прямо сейчас."""
+    ids: list[str] = []
+    with _running_lock:
+        ids.extend(_running.keys())
+    with _streams_lock:
+        for pid, thread in _streams.items():
+            if thread.is_alive() and pid not in ids:
+                ids.append(pid)
+    return ids
+
+
 def _mark(pid: str, delta: int) -> None:
     with _running_lock:
         count = _running.get(pid, 0) + delta

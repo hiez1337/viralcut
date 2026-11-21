@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from . import custom_debug, custom_downloader
 from .config import ASSETS_DIR, ensure_path, ffmpeg, ffmpeg_bin_dir
 from .errors import Cancelled
 from .utils import subprocess_kwargs
@@ -159,8 +160,14 @@ def _attempt(url: str, dest_dir: Path, fmt: str, clients: Optional[List[str]],
                 if eta:
                     eta_txt = f" · осталось {int(eta)//60}:{int(eta)%60:02d}"
                 progress(min(pct, 99.0) / 100.0, f"Скачивание {pct:.0f}% · {speed_txt}{eta_txt}")
+            custom_debug.record_download(
+                active=True, kind="video", format_id=fmt,
+                speed_mbps=(speed / 1048576.0) if speed else None,
+                pct=min(pct, 99.0), eta_s=d.get("eta"),
+            )
         elif status == "finished":
             timings["download_finished"] = timings["download_finished"] or time.time()
+            custom_debug.record_download(active=True, pct=99.0)
             if progress:
                 progress(0.99, "Дорожки скачаны · объединение через FFmpeg…")
 
@@ -347,37 +354,8 @@ def _youtube_info(url: str, browser: Optional[str], pot: bool,
 
 
 def _pick_format(info: Dict[str, Any], max_height: int) -> tuple[str, int]:
-    """Формат из фактически доступных — вместо «слепой» строки селектора.
-
-    Возвращает (селектор, реальная высота): подпись в интерфейсе должна
-    показывать то качество, которое источник действительно отдал.
-    """
-    formats = [f for f in (info.get("formats") or []) if f.get("format_id")]
-    videos = [f for f in formats if (f.get("vcodec") or "none") != "none" and f.get("height")]
-    if not videos:
-        return (FORMAT_HD if max_height > 360 else FORMAT_SD), 0
-    fitting = [f for f in videos if int(f.get("height") or 0) <= max_height] or videos
-
-    def rank(f: Dict[str, Any]) -> tuple:
-        codec = f.get("vcodec") or ""
-        return (
-            1 if codec.startswith("avc1") else 0,
-            1 if f.get("ext") == "mp4" else 0,
-            1 if (f.get("acodec") or "none") != "none" else 0,
-            int(f.get("height") or 0),
-        )
-
-    video = max(fitting, key=rank)
-    height = int(video.get("height") or 0)
-    if (video.get("acodec") or "none") != "none":
-        return str(video["format_id"]), height
-    audios = [f for f in formats
-              if (f.get("vcodec") or "none") == "none" and (f.get("acodec") or "none") != "none"]
-    if audios:
-        audio = max(audios, key=lambda f: (1 if f.get("ext") == "m4a" else 0,
-                                           float(f.get("abr") or f.get("tbr") or 0)))
-        return f"{video['format_id']}+{audio['format_id']}", height
-    return str(video["format_id"]), height
+    """Формат из фактически доступных — вместо «слепой» строки селектора."""
+    return custom_downloader.pick_best_format(info, max_height)
 
 
 def download(url: str, dest_dir: Path, progress: ProgressCb = None,
@@ -437,10 +415,15 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
 
     last_error: Optional[Exception] = None
     failed_reasons: List[str] = []
+    custom_debug.record_download(
+        active=True, kind="video", target_height=max_height, source_height=0,
+        fallback=False, fallback_reason="", pct=0.0,
+    )
     for idx, (label, clients, fmt, pot, extra_args) in enumerate(attempts):
         if idx > 0:
             _clean_partials(dest_dir)
         try:
+            custom_debug.record_download(active=True, kind="video", client=label, format_id=fmt)
             if progress:
                 progress(0.01, f"Скачивание ({label})")
             meta = None
@@ -459,10 +442,18 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
             meta["quality"] = label
             meta["fallback"] = bool(failed_reasons)
             meta["fallback_reason"] = failed_reasons[0] if failed_reasons else None
+            custom_debug.record_download(
+                active=False, kind="video", client=label,
+                format_id=meta.get("selected_format") or fmt,
+                source_height=meta.get("height") or 0, target_height=max_height,
+                speed_mbps=meta.get("avg_speed_mbps"), pct=100.0,
+                fallback=meta["fallback"], fallback_reason=meta["fallback_reason"] or "",
+            )
             print(f"download ok: {label} height={meta.get('height')} format={meta.get('selected_format')}",
                   file=sys.stderr)
             return meta
         except Cancelled:
+            custom_debug.record_download(active=False)
             raise
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -472,6 +463,11 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
                 break
             if progress and not force_hd:
                 progress(0.01, f"{label} не удалось · пробую ниже качеством")
+
+    custom_debug.record_download(
+        active=False, kind="video", fallback=True,
+        fallback_reason=_fmt_err(last_error or DownloadError("Не удалось скачать видео")),
+    )
 
     reason = _fmt_err(last_error or DownloadError("Не удалось скачать видео"))
     if force_hd:
@@ -712,8 +708,14 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
                 mb = speed / 1024 / 1024
                 sp = f"{mb:.2f} МБ/с" if speed else "…"
                 progress(min(pct, 99) / 100.0, f"Скачивание аудио {pct:.0f}% · {sp}")
+            custom_debug.record_download(
+                active=True, kind="audio", client="audio", format_id=AUDIO_FORMAT,
+                speed_mbps=(speed / 1048576.0) if speed else None,
+                pct=min(pct, 99.0), eta_s=d.get("eta"),
+            )
         elif d.get("status") == "finished":
             timings["finished"] = time.time()
+            custom_debug.record_download(active=False, kind="audio", pct=100.0)
             if progress:
                 progress(0.99, "Аудио скачано · распознавание речи")
 
@@ -770,90 +772,14 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
 
 def download_section(url: str, dest_dir: Path, start: float, end: float,
                      progress: ProgressCb = None, browser: Optional[str] = None,
-                     max_height: int = 1080) -> Path:
+                     max_height: int = 1080, force_hd: bool = False,
+                     meta_out: Optional[Dict[str, Any]] = None) -> Path:
     """Скачивает только фрагмент видео (для экономного режима)."""
-    import yt_dlp
-    from yt_dlp.utils import download_range_func
-
-    ensure_path()
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    outtmpl = str(dest_dir / "section.%(ext)s")
-    if max_height <= 360:
-        fmt = FORMAT_SD
-    else:
-        fmt = (
-            f"bv*[ext=mp4][vcodec^=avc1][height<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][vcodec^=avc1][width<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][height<={max_height}]+ba[ext=m4a]/"
-            f"bv*[ext=mp4][width<={max_height}]+ba[ext=m4a]/"
-            f"bv*[height<={max_height}]+ba/bv*[width<={max_height}]+ba/"
-            f"b[height<={max_height}]/b[width<={max_height}]/b"
-        )
-    if not is_youtube(url):
-        fmt = f"b[width<={max_height}]/b[height<={max_height}]/b/" + fmt
-
-    def hook(d: Dict[str, Any]) -> None:
-        if d.get("status") == "downloading" and progress:
-            total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-            got = d.get("downloaded_bytes") or 0
-            pct = (got / total * 100) if total else 0
-            progress(min(pct, 99) / 100.0, "Скачивание момента")
-        elif d.get("status") == "finished" and progress:
-            progress(0.99, "Момент скачан · рендер")
-
-    formats = [fmt]
-    if is_youtube(url):
-        formats.append(FORMAT_SD)
-
-    last_error: Optional[Exception] = None
-    for fi, fmt_try in enumerate(formats):
-        _clean_partials(dest_dir)
-        opts: Dict[str, Any] = {
-            "outtmpl": outtmpl,
-            "format": fmt_try,
-            "merge_output_format": "mp4",
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-            "progress_hooks": [hook],
-            "retries": 3,
-            "fragment_retries": 5,
-            "concurrent_fragment_downloads": 2,
-            "download_ranges": download_range_func(None, [(start, end)]),
-            "force_keyframes_at_cuts": True,
-            "ffmpeg_location": str(ffmpeg_bin_dir()),
-            "socket_timeout": 30,
-        }
-        if is_youtube(url):
-            if _pot_enabled():
-                opts["extractor_args"] = {
-                    "youtube": {"player_client": ["mweb", "web"], "fetch_pot": ["always"]},
-                    "youtubepot-bgutilhttp": {"base_url": [os.environ["VIRALCUT_POT_URL"]]},
-                }
-                opts["js_runtimes"] = {"node": {"path": os.environ["VIRALCUT_NODE"]}}
-            else:
-                opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
-        opts.update(_cookie_opts(browser))
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.extract_info(url, download=True)
-            if any(p.suffix not in (".part", ".ytdl") for p in dest_dir.glob("section.*")):
-                break
-        except Exception as exc:  # noqa: BLE001
-            last_error = exc
-            if fi + 1 >= len(formats):
-                raise
-
-    candidates = [p for p in dest_dir.glob("section.*") if p.suffix not in (".part", ".ytdl")]
-    if not candidates:
-        raise DownloadError("Не удалось скачать фрагмент видео.")
-    path = max(candidates, key=lambda p: p.stat().st_size)
-    if path.suffix.lower() != ".mp4":
-        mp4 = dest_dir / "section.mp4"
-        subprocess.run([ffmpeg(), "-y", "-v", "error", "-i", str(path), "-c", "copy", str(mp4)],
-                       check=False, **subprocess_kwargs())
-        if mp4.exists() and mp4.stat().st_size > 0:
-            path.unlink(missing_ok=True)
-            path = mp4
+    path, meta = custom_downloader.download_section_smart(
+        url, dest_dir, start, end,
+        progress=progress, browser=browser,
+        max_height=max_height, force_hd=force_hd,
+    )
+    if meta_out is not None:
+        meta_out.update(meta)
     return path

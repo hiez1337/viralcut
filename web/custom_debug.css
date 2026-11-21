@@ -1,0 +1,323 @@
+/* Native dark-glass styles for the live Debug Inspector */
+
+.vc-dbg-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.vc-dbg-row .health {
+  cursor: pointer;
+  min-width: 0;
+  flex: 1;
+}
+
+.vc-dbg-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--grouped);
+  border: 1px solid var(--separator);
+  transition: background 0.16s var(--ease), color 0.16s var(--ease), border-color 0.16s;
+  flex: none;
+}
+
+.vc-dbg-toggle:hover,
+.vc-dbg-toggle.open {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: rgba(167, 139, 250, 0.42);
+}
+
+.vc-dbg-toggle .vc-dbg-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted-2);
+}
+
+.vc-dbg-toggle.busy .vc-dbg-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(139, 92, 246, 0.7);
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.vc-dbg-toggle.warn .vc-dbg-dot {
+  background: var(--warn);
+  box-shadow: 0 0 8px rgba(255, 214, 10, 0.65);
+}
+
+.vc-dbg-fab {
+  display: none;
+  position: fixed;
+  right: 14px;
+  bottom: 14px;
+  z-index: 39;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  background: rgba(24, 24, 32, 0.88);
+  border: 1px solid var(--hairline);
+  backdrop-filter: blur(24px) saturate(160%);
+  box-shadow: var(--shadow-soft);
+}
+
+.vc-dbg-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 20px;
+  z-index: 40;
+  width: min(580px, calc(100vw - 320px));
+  max-height: min(72vh, 540px);
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--radius-lg);
+  background: rgba(18, 18, 24, 0.86);
+  border: 1px solid var(--hairline);
+  backdrop-filter: blur(36px) saturate(180%);
+  -webkit-backdrop-filter: blur(36px) saturate(180%);
+  box-shadow: var(--shadow-pop);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  opacity: 0;
+  transform: translateY(12px) scale(0.985);
+  pointer-events: none;
+  transition: opacity 0.18s var(--ease), transform 0.18s var(--ease);
+}
+
+.vc-dbg-panel.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  pointer-events: auto;
+}
+
+.vc-dbg-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--separator);
+}
+
+.vc-dbg-head-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.vc-dbg-title {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.vc-dbg-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 100px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--grouped-2);
+  border: 1px solid var(--separator);
+  white-space: nowrap;
+}
+
+.vc-dbg-chip.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.vc-dbg-chip.ok {
+  color: #86efac;
+  background: rgba(48, 209, 88, 0.14);
+  border-color: rgba(48, 209, 88, 0.3);
+}
+
+.vc-dbg-chip.warn {
+  color: #fde047;
+  background: rgba(255, 214, 10, 0.14);
+  border-color: rgba(255, 214, 10, 0.34);
+}
+
+.vc-dbg-chip.err {
+  color: #fca5a5;
+  background: rgba(255, 69, 58, 0.14);
+  border-color: rgba(255, 69, 58, 0.34);
+}
+
+.vc-dbg-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.vc-dbg-btn {
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted);
+  background: var(--grouped-2);
+  border: 1px solid var(--separator);
+  transition: background 0.14s, color 0.14s;
+}
+
+.vc-dbg-btn:hover {
+  color: var(--text);
+  background: var(--grouped);
+}
+
+.vc-dbg-body {
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.vc-dbg-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vc-dbg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 11px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--grouped-2);
+  border: 1px solid var(--separator);
+  min-width: 0;
+}
+
+.vc-dbg-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-2);
+}
+
+.vc-dbg-kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.vc-dbg-k {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.vc-dbg-v {
+  color: var(--text);
+  font-weight: 600;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.vc-dbg-bar {
+  height: 5px;
+  width: 100%;
+  border-radius: 100px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.vc-dbg-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 100px;
+  background: var(--grad);
+  transition: width 0.25s var(--ease);
+}
+
+.vc-dbg-bar > i.warn {
+  background: var(--warn);
+}
+
+.vc-dbg-bar > i.err {
+  background: var(--danger);
+}
+
+.vc-dbg-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted-2);
+  word-break: break-word;
+}
+
+.vc-dbg-note.warn {
+  color: #fde047;
+}
+
+.vc-dbg-proc {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid var(--separator);
+}
+
+.vc-dbg-proc-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.vc-dbg-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+  font-size: 10.5px;
+  color: var(--muted-2);
+}
+
+@media (max-width: 940px) {
+  .vc-dbg-fab {
+    display: inline-flex;
+  }
+  .vc-dbg-panel {
+    right: 12px;
+    left: 12px;
+    bottom: 58px;
+    width: auto;
+    max-height: 68vh;
+  }
+}
+
+@media (max-width: 640px) {
+  .vc-dbg-grid {
+    grid-template-columns: 1fr;
+  }
+}

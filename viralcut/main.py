@@ -157,6 +157,13 @@ def health() -> Dict[str, Any]:
     }
 
 
+@app.get("/api/debug")
+def debug_status() -> Dict[str, Any]:
+    from . import custom_debug
+
+    return custom_debug.snapshot()
+
+
 @app.get("/api/update")
 def update_state(force: bool = False) -> Dict[str, Any]:
     """Состояние проверки обновлений; сеть — только в фоне или по force."""

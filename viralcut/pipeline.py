@@ -295,11 +295,27 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
         try:
             sec_start = max(0.0, float(clip["start"]) - 0.5)
             sec_end = min(duration or float(clip["end"]) + 1, float(clip["end"]) + 0.5)
+            sec_meta: Dict[str, Any] = {}
             part = downloader.download_section(
                 project["url"], sections / clip["id"], sec_start, sec_end,
                 progress=sub_progress, browser=opts.get("cookies_browser") or None,
                 max_height=int(opts.get("max_height", 1080)),
+                force_hd=bool(opts.get("force_hd", False)),
+                meta_out=sec_meta,
             )
+            if sec_meta.get("source_height"):
+                db.merge_meta(pid, {
+                    "width": sec_meta.get("width") or 0,
+                    "height": sec_meta.get("height") or sec_meta["source_height"],
+                    "source_height": sec_meta["source_height"],
+                    "max_height": sec_meta.get("max_height"),
+                    "quality": sec_meta.get("quality"),
+                    "selected_format": sec_meta.get("selected_format"),
+                    "vcodec": sec_meta.get("vcodec"),
+                    "avg_speed_mbps": sec_meta.get("avg_speed_mbps"),
+                    "fallback": sec_meta.get("fallback"),
+                    "fallback_reason": sec_meta.get("fallback_reason"),
+                })
             actual = utils.media_duration(part)
             offset = max(0.0, float(clip["start"]) - sec_start)
             words = []

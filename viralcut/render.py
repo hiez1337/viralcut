@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import ffmpeg
-from . import custom_fonts
+from . import custom_debug, custom_fonts
 from .reframe import crop_expressions
 from .utils import MediaError, probe, run, subprocess_kwargs
 
@@ -200,6 +200,10 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             errors="replace", bufsize=1, **subprocess_kwargs())
     assert proc.stdout is not None and proc.stderr is not None
+    custom_debug.register_process(
+        proc.pid, "ffmpeg", label=out_path.name, encoder=hw or "libx264",
+        source_res=f"{info['width']}x{info['height']}", target_res=f"{w}x{h}",
+    )
 
     tail: list = []
     killed = {"hit": False, "reason": ""}
@@ -232,16 +236,20 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
     try:
         for line in proc.stdout:
             line = line.strip()
-            if line.startswith("out_time_us=") and on_progress:
+            if line.startswith("out_time_us="):
                 try:
                     done = int(line.split("=", 1)[1]) / 1_000_000
                 except ValueError:
                     continue
-                on_progress(round(min(0.99, done / duration), 3))
+                prog = round(min(0.99, done / duration), 3)
+                custom_debug.update_process(proc.pid, progress=prog)
+                if on_progress:
+                    on_progress(prog)
         proc.wait()
     finally:
         timer.cancel()
         reader.join(timeout=2)
+        custom_debug.unregister_process(proc.pid)
 
     if killed["hit"]:
         out_path.unlink(missing_ok=True)
@@ -256,13 +264,20 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         out_path.unlink(missing_ok=True)
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, errors="replace", bufsize=1, **subprocess_kwargs())
+        custom_debug.register_process(
+            proc.pid, "ffmpeg", label=out_path.name, encoder="libx264",
+            source_res=f"{info['width']}x{info['height']}", target_res=f"{w}x{h}",
+        )
         tail = []
-        if proc.stderr is not None:
-            for line in proc.stderr:
-                tail.append(line)
-                if len(tail) > 40:
-                    tail.pop(0)
-        proc.wait()
+        try:
+            if proc.stderr is not None:
+                for line in proc.stderr:
+                    tail.append(line)
+                    if len(tail) > 40:
+                        tail.pop(0)
+            proc.wait()
+        finally:
+            custom_debug.unregister_process(proc.pid)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size < 10000:
         raise MediaError("Не удалось отрендерить клип: " + "".join(tail)[-600:])
 

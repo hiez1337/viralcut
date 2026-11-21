@@ -99,11 +99,17 @@ def _get_model(long_audio: bool = False):
         if not long_audio and _MODEL is not None:
             return _MODEL
         from faster_whisper import WhisperModel
+        from . import custom_debug
         from .custom_whisper import whisper_candidates
 
         local_dir = Path(WHISPER_LOCAL_DIR) if WHISPER_LOCAL_DIR else None
         model_ref = str(local_dir) if local_dir and (local_dir / "model.bin").is_file() else WHISPER_MODEL
         candidates = whisper_candidates(long_audio, WHISPER_DEVICE, WHISPER_COMPUTE)
+        custom_debug.record_whisper(
+            model=WHISPER_MODEL,
+            status="downloading" if not model_cached() else "loading",
+            fallback_reason="",
+        )
         last_exc = None
         model = None
         for device, compute in candidates:
@@ -115,10 +121,14 @@ def _get_model(long_audio: bool = False):
                     download_root=str(MODELS_DIR),
                 )
                 model._vc_device = device  # type: ignore[attr-defined]
+                custom_debug.record_whisper(
+                    model=WHISPER_MODEL, device=device, compute_type=compute, status="ready",
+                )
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 model = None
+                custom_debug.record_whisper(fallback_reason=f"{device}/{compute}: {str(exc)[:160]}")
                 print(f"[whisper] {device}/{compute} недоступен: {str(exc)[:200]}",
                       file=sys.stderr, flush=True)
         if model is None:
