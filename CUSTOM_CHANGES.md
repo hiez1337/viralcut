@@ -93,6 +93,15 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v`.
   - Open `Инспектор` at `http://localhost:8765/` and verify `Диск и очистка` card renders accurate sizes and active states for both buttons.
 
+## Complete Fork README Rewrite & GitHub Metadata Cleanup
+- **Goal**: Rewrite `README.md` from scratch for the `hiez1337/viralcut` fork so visitors and users are not misled by upstream release downloads, `@ivanAI22` badges/banners, `vanwild11.github.io` links, `small` model defaults, or outdated instructions. Update GitHub repository metadata (`default_branch=custom`, fork-specific description, clear upstream homepage URL).
+- **Modified files**:
+  - `README.md`: full rewrite covering fork differences, CUDA/`large-v3`/NVENC defaults, Inspector & disk cleanup, disabled-by-default auto-updates, accurate environment variables, API endpoints, source-run setup (`run_windows.bat` / `./run.sh`), branch workflow, and clear separation from upstream `vanwild11/viralcut`.
+  - `CUSTOM_CHANGES.md`: documented this README & repository metadata update.
+- **Verification**:
+  - Check `README.md` contains no stale `1.3.0` or `@ivanAI22` references and links only valid local paths and `hiez1337/viralcut` (with `vanwild11/viralcut` referenced solely for upstream attribution/updater explanation).
+  - Verify `gh repo view hiez1337/viralcut --json defaultBranchRef,description,homepageUrl` shows `custom`, updated fork description, and empty `homepageUrl`.
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.
