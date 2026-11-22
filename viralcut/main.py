@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import custom_fonts, db, jobs, pipeline, transcribe
+from . import custom_fonts, custom_whisper, db, jobs, pipeline, transcribe
 from ._version import __version__
 from .config import ASSETS_DIR, DATA_DIR, PROJECTS_DIR, WEB_DIR, ffmpeg
 
@@ -30,6 +30,10 @@ class UpdateSettingsIn(BaseModel):
 
 class CleanupIn(BaseModel):
     scope: str = "temp"
+
+
+class WhisperModelIn(BaseModel):
+    model: str
 
 
 class RetryIn(BaseModel):
@@ -160,9 +164,33 @@ def health() -> Dict[str, Any]:
         "ok": ok_ffmpeg,
         "ffmpeg": ok_ffmpeg,
         "whisper": transcribe.model_available(),
+        "whisper_model": custom_whisper.get_active_model(),
         "model": transcribe.model_cached(),
         "projects": db.count_projects(),
     }
+
+
+@app.get("/api/whisper/models")
+def whisper_models() -> Dict[str, Any]:
+    return custom_whisper.models_payload()
+
+
+@app.post("/api/whisper/model")
+def whisper_set_model(body: WhisperModelIn) -> Dict[str, Any]:
+    try:
+        return custom_whisper.set_active_model(body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/whisper/download")
+def whisper_download_model(body: WhisperModelIn) -> Dict[str, Any]:
+    try:
+        return custom_whisper.start_model_download(body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
 
 
 @app.get("/api/debug")

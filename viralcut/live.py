@@ -534,7 +534,10 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                     playlist.unlink(missing_ok=True)
                 if result.returncode or not audio.exists() or audio.stat().st_size < 1024:
                     raise RuntimeError(f"ffmpeg не извлёк звук (код {result.returncode})")
-                transcript = transcribe.transcribe(audio, workdir, language=language)
+                transcript = transcribe.transcribe(
+                    audio, workdir, language=language,
+                    model_name=opts.get("whisper_model") or None,
+                )
                 language = transcript.get("language") or language
                 print(f"[live] window {win_start:.0f}-{win_end:.0f} "
                       f"segments={len(transcript['segments'])}", file=sys.stderr)

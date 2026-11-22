@@ -356,7 +356,11 @@
     const devClass = isCuda ? "ok" : w.device === "cpu" ? "warn" : "";
     const devLabel = `${w.device || "auto"} · ${w.compute_type || "—"}`;
     const expMb = w.expected_mb;
-    const dlModelPct = w.downloading && expMb ? Math.min(99, Math.round((w.cache_mb / expMb) * 100)) : 0;
+    const dlModelPct = w.downloading
+      ? Math.min(99, Math.round(w.pct != null ? Number(w.pct) : (expMb ? (w.cache_mb / expMb) * 100 : 0)))
+      : 0;
+    const dlModelEta = w.eta_s != null ? ` · ~${fmtDurSec(w.eta_s)}` : "";
+    const dlModelName = w.download_model && w.download_model !== w.model ? ` (${w.download_model})` : "";
 
     const whisperHtml = `
       <div class="vc-dbg-card">
@@ -367,12 +371,13 @@
         <div class="vc-dbg-kv"><span class="vc-dbg-k">Модель</span><span class="vc-dbg-v">${esc(w.model || "—")}</span></div>
         <div class="vc-dbg-kv"><span class="vc-dbg-k">Состояние</span><span class="vc-dbg-v">${esc(w.status || "idle")}</span></div>
         ${w.downloading ? `
-          <div class="vc-dbg-kv"><span class="vc-dbg-k">Загрузка весов</span><span class="vc-dbg-v">${fmtNum(w.cache_mb, " МБ")}${expMb ? ` / ~${expMb}` : ""} · ${fmtNum(w.download_speed_mbps, " МБ/с")}</span></div>
-          <div class="vc-dbg-bar"><i style="width:${dlModelPct}%"></i></div>
+          <div class="vc-dbg-kv"><span class="vc-dbg-k">Загрузка весов${esc(dlModelName)}</span><span class="vc-dbg-v">${dlModelPct}% · ${fmtNum(w.cache_mb, " МБ")}${expMb ? ` / ~${expMb}` : ""} · ${fmtNum(w.download_speed_mbps, " МБ/с")}${dlModelEta}</span></div>
+          <div class="vc-dbg-bar"><i style="width:${Math.max(2, dlModelPct)}%"></i></div>
         ` : `
           <div class="vc-dbg-kv"><span class="vc-dbg-k">Кэш на диске</span><span class="vc-dbg-v">${w.cached ? `${w.cache_mb} МБ (готов)` : "не скачана"}</span></div>
         `}
         ${w.fallback_reason ? `<div class="vc-dbg-note warn">Откат: ${esc(w.fallback_reason)}</div>` : ""}
+        ${!w.fallback_reason && w.cuda_note ? `<div class="vc-dbg-note warn">${esc(w.cuda_note)}</div>` : ""}
       </div>
     `;
 

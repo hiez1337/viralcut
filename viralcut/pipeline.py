@@ -9,7 +9,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from . import analyze, custom_downloader, db, downloader, reframe, render, subtitles, transcribe, utils
+from . import analyze, custom_downloader, custom_whisper, db, downloader, reframe, render, subtitles, transcribe, utils
 from .errors import Cancelled
 from .config import PROJECTS_DIR
 
@@ -34,6 +34,7 @@ DEFAULT_OPTIONS: Dict[str, Any] = {
     "max_height": 1080,
     "segments": False,
     "force_hd": False,
+    "whisper_model": "",
 }
 
 
@@ -87,6 +88,12 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     opts["language"] = str(opts.get("language") or "auto")
     if opts["language"] == "auto":
         opts["language"] = ""
+    raw_wm = str(opts.get("whisper_model") or "").strip()
+    if raw_wm:
+        norm_wm = custom_whisper.normalize_model_name(raw_wm)
+        opts["whisper_model"] = norm_wm if norm_wm in custom_whisper.REPO_IDS else ""
+    else:
+        opts["whisper_model"] = ""
     return opts
 
 
@@ -221,12 +228,24 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
     if duration < 5:
         raise RuntimeError("Видео слишком короткое для нарезки.")
 
-    progress(0.32, "Распознавание речи")
+    w_model = opts.get("whisper_model") or custom_whisper.get_active_model()
+    asr_base, asr_span = 0.32, 0.38
+    if not transcribe.model_cached(w_model):
+        size_mb = custom_whisper.expected_size_mb(w_model) or 465
+        progress(0.30, f"Скачиваю модель Whisper {w_model} (~{size_mb} МБ, один раз)")
+        custom_whisper.ensure_model_downloaded(
+            w_model,
+            on_progress=lambda p, st: progress(0.30 + max(0.0, min(1.0, p)) * 0.06, st),
+        )
+        asr_base, asr_span = 0.36, 0.34
+
+    progress(asr_base, "Распознавание речи")
     stop_hb, hb_thread = _heartbeat(pid, "Распознавание речи")
     try:
         transcript = transcribe.transcribe(
             audio["path"], workdir, language=opts.get("language") or None,
-            on_progress=lambda p, st: progress(0.32 + p * 0.38, f"{st} {int(p*100)}%"),
+            on_progress=lambda p, st: progress(asr_base + p * asr_span, f"{st} {int(p*100)}%"),
+            model_name=w_model,
         )
     finally:
         stop_hb.set(); hb_thread.join(timeout=1)
@@ -429,15 +448,30 @@ def process_project(pid: str) -> None:
     duration = info["duration"]
 
     try:
-        progress(0.05, "Распознавание речи")
+        w_model = opts.get("whisper_model") or custom_whisper.get_active_model()
         transcript: Optional[Dict[str, Any]] = None
-        if not transcribe.model_cached():
-            progress(0.05, "Скачиваю модель распознавания речи (~460 МБ, один раз)")
+        asr_base, asr_span = 0.05, 0.45
+        if not transcribe.model_cached(w_model):
+            size_mb = custom_whisper.expected_size_mb(w_model) or 465
+            progress(0.05, f"Скачиваю модель Whisper {w_model} (~{size_mb} МБ, один раз)")
+            try:
+                custom_whisper.ensure_model_downloaded(
+                    w_model,
+                    on_progress=lambda p, st: progress(0.05 + max(0.0, min(1.0, p)) * 0.07, st),
+                )
+                asr_base, asr_span = 0.12, 0.38
+            except Cancelled:
+                raise
+            except Exception:
+                # Если HuggingFace недоступен, transcribe() сам попробует резервные субтитры
+                pass
+        progress(asr_base, "Распознавание речи")
         stop_hb, hb_thread = _heartbeat(pid, "Распознавание речи")
         try:
             transcript = transcribe.transcribe(
                 source, workdir, language=opts.get("language") or None,
-                on_progress=lambda p, s: progress(0.05 + p * 0.45, f"{s} {int(p*100)}%"),
+                on_progress=lambda p, s: progress(asr_base + p * asr_span, f"{s} {int(p*100)}%"),
+                model_name=w_model,
             )
             stop_hb.set(); hb_thread.join(timeout=1)
         except Cancelled:

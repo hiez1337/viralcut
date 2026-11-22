@@ -14,11 +14,13 @@ from unittest import mock
 from fastapi import HTTPException
 
 from viralcut import (
+    config,
     custom_cleanup,
     custom_debug,
     custom_downloader,
     custom_fonts,
     custom_updater,
+    custom_whisper,
     db,
     downloader,
     errors,
@@ -488,6 +490,166 @@ class CustomCleanupTest(unittest.TestCase):
                 with self.assertRaises(HTTPException) as ctx:
                     main.debug_cleanup(main.CleanupIn(scope="invalid"))
                 self.assertEqual(ctx.exception.status_code, 400)
+
+
+class CustomWhisperTest(unittest.TestCase):
+    def setUp(self):
+        self._orig_runtime = custom_whisper._RUNTIME_MODEL
+        self._orig_cfg_model = config.WHISPER_MODEL
+        self._orig_downloads = dict(custom_whisper._DOWNLOADS)
+
+    def tearDown(self):
+        custom_whisper._RUNTIME_MODEL = self._orig_runtime
+        config.WHISPER_MODEL = self._orig_cfg_model
+        with custom_whisper._DL_LOCK:
+            custom_whisper._DOWNLOADS.clear()
+            custom_whisper._DOWNLOADS.update(self._orig_downloads)
+
+    def test_default_is_small_and_selection_persists(self):
+        self.assertEqual(custom_whisper.DEFAULT_WHISPER_MODEL, "small")
+        self.assertEqual(custom_whisper.normalize_model_name("large"), "large-v3")
+        self.assertEqual(custom_whisper.normalize_model_name(""), "small")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            models_dir = data_dir / "models"
+            models_dir.mkdir()
+            with mock.patch.object(config, "DATA_DIR", data_dir), \
+                 mock.patch.object(config, "MODELS_DIR", models_dir), \
+                 mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("VIRALCUT_WHISPER", None)
+                custom_whisper._RUNTIME_MODEL = None
+                self.assertEqual(custom_whisper.resolve_whisper_model(), "small")
+
+                res = main.whisper_set_model(main.WhisperModelIn(model="medium"))
+                self.assertEqual(res["active"], "medium")
+                self.assertTrue((data_dir / "whisper.json").is_file())
+
+                custom_whisper._RUNTIME_MODEL = None
+                self.assertEqual(custom_whisper.resolve_whisper_model(), "medium")
+                self.assertEqual(main.health()["whisper_model"], "medium")
+
+                with self.assertRaises(HTTPException) as ctx:
+                    main.whisper_set_model(main.WhisperModelIn(model="unknown-xl"))
+                self.assertEqual(ctx.exception.status_code, 400)
+
+    def test_resolve_model_ref_does_not_override_other_models_with_bundled_small(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bundled = Path(tmp) / "models" / "whisper-small"
+            bundled.mkdir(parents=True)
+            (bundled / "model.bin").write_bytes(b"X" * 2048)
+
+            self.assertEqual(custom_whisper.resolve_model_ref("small", str(bundled)), str(bundled))
+            self.assertEqual(custom_whisper.resolve_model_ref("medium", str(bundled)), "medium")
+            self.assertEqual(custom_whisper.resolve_model_ref("large-v3", str(bundled)), "large-v3")
+
+    def test_missing_cuda_dlls_fall_back_safely_to_cpu(self):
+        with mock.patch.object(custom_whisper, "_ct2_cuda_device_count", return_value=1), \
+             mock.patch.object(custom_whisper, "_cuda_dlls_available", return_value=False):
+            self.assertFalse(custom_whisper._has_cuda_gpu())
+            self.assertEqual(custom_whisper.whisper_candidates(False, "auto", "int8"), [("cpu", "int8")])
+            diag = custom_whisper.cuda_diagnostics()
+            if sys.platform != "darwin":
+                self.assertTrue(diag["gpu_detected"])
+                self.assertFalse(diag["cuda_ready"])
+                self.assertEqual(diag["device_label"], "CPU")
+                self.assertTrue(diag["reason"])
+
+    def test_ensure_model_downloaded_tracks_progress_and_skips_cached(self):
+        import huggingface_hub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            models_dir = data_dir / "models"
+            models_dir.mkdir()
+            custom_whisper._DOWNLOADS.clear()
+            progress_events = []
+
+            def fake_snapshot(repo_id, cache_dir=None, allow_patterns=None, tqdm_class=None):
+                self.assertEqual(repo_id, "Systran/faster-whisper-medium")
+                bar = tqdm_class(total=1000, unit="B", name="huggingface_hub.snapshot_download")
+                bar.update(400)
+                snap = Path(cache_dir) / "models--Systran--faster-whisper-medium" / "snapshots" / "abc"
+                snap.mkdir(parents=True, exist_ok=True)
+                (snap / "model.bin").write_bytes(b"M" * (2 * 1024 * 1024))
+                bar.update(600)
+                bar.close()
+                return str(snap)
+
+            with mock.patch.object(config, "DATA_DIR", data_dir), \
+                 mock.patch.object(config, "MODELS_DIR", models_dir), \
+                 mock.patch.object(config, "WHISPER_LOCAL_DIR", ""), \
+                 mock.patch.object(huggingface_hub, "snapshot_download", side_effect=fake_snapshot) as mocked_snap:
+                custom_whisper.ensure_model_downloaded(
+                    "medium",
+                    on_progress=lambda frac, txt: progress_events.append((frac, txt)),
+                )
+                mocked_snap.assert_called_once()
+                self.assertTrue(custom_whisper.is_model_cached("medium"))
+                dl_info = custom_whisper.get_download_info("medium")
+                self.assertEqual(dl_info["state"], "done")
+                self.assertEqual(dl_info["pct"], 100.0)
+                self.assertTrue(any(f >= 0.4 for f, _ in progress_events))
+
+                # Already cached: second call must not hit HuggingFace again
+                custom_whisper.ensure_model_downloaded("medium")
+                mocked_snap.assert_called_once()
+
+    def test_start_model_download_rejects_concurrent_second_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            models_dir = data_dir / "models"
+            models_dir.mkdir()
+            with mock.patch.object(config, "DATA_DIR", data_dir), \
+                 mock.patch.object(config, "MODELS_DIR", models_dir), \
+                 mock.patch.object(config, "WHISPER_LOCAL_DIR", ""):
+                with custom_whisper._DL_LOCK:
+                    custom_whisper._DOWNLOADS["medium"] = custom_whisper._new_download_entry("medium")
+                # Same model is idempotent
+                payload = main.whisper_download_model(main.WhisperModelIn(model="medium"))
+                self.assertEqual(payload["downloading_model"], "medium")
+                # Different model returns 409 Conflict
+                with self.assertRaises(HTTPException) as ctx:
+                    main.whisper_download_model(main.WhisperModelIn(model="large-v3"))
+                self.assertEqual(ctx.exception.status_code, 409)
+
+    def test_transcribe_get_model_switches_cached_slot_on_model_change(self):
+        import faster_whisper
+
+        created = []
+
+        class FakeModel:
+            def __init__(self, ref, device="cpu", compute_type="int8", download_root=None):
+                self.ref = ref
+                created.append(ref)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            models_dir = Path(tmp)
+            for name in ("small", "medium"):
+                snap = models_dir / f"models--Systran--faster-whisper-{name}" / "snapshots" / "s1"
+                snap.mkdir(parents=True)
+                (snap / "model.bin").write_bytes(b"W" * (2 * 1024 * 1024))
+
+            transcribe._reset_model()
+            try:
+                with mock.patch.object(config, "MODELS_DIR", models_dir), \
+                     mock.patch.object(transcribe, "MODELS_DIR", models_dir), \
+                     mock.patch.object(transcribe, "WHISPER_LOCAL_DIR", ""), \
+                     mock.patch.object(custom_whisper, "whisper_candidates", return_value=[("cpu", "int8")]), \
+                     mock.patch.object(faster_whisper, "WhisperModel", FakeModel):
+                    m1 = transcribe._get_model(model_name="small")
+                    m2 = transcribe._get_model(model_name="small")
+                    self.assertIs(m1, m2)
+                    m3 = transcribe._get_model(model_name="medium")
+                    self.assertIsNot(m1, m3)
+                    self.assertEqual(created, ["small", "medium"])
+            finally:
+                transcribe._reset_model()
+
+    def test_pipeline_normalize_options_whisper_model(self):
+        self.assertEqual(pipeline.normalize_options({"whisper_model": "large"})["whisper_model"], "large-v3")
+        self.assertEqual(pipeline.normalize_options({"whisper_model": "medium"})["whisper_model"], "medium")
+        self.assertEqual(pipeline.normalize_options({"whisper_model": "bogus"})["whisper_model"], "")
 
 
 if __name__ == "__main__":

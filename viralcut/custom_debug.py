@@ -547,9 +547,13 @@ def _resolved_idle_whisper() -> Tuple[str, str]:
 
 
 def _inspect_model_cache(model_name: str) -> Dict[str, Any]:
-    expected_mb = _EXPECTED_MODEL_MB.get(model_name)
-    if WHISPER_LOCAL_DIR:
-        local_bin = Path(WHISPER_LOCAL_DIR) / "model.bin"
+    from . import custom_whisper
+
+    norm = custom_whisper.normalize_model_name(model_name)
+    expected_mb = custom_whisper.expected_size_mb(norm) or _EXPECTED_MODEL_MB.get(norm)
+    local_ref = custom_whisper.resolve_model_ref(norm, WHISPER_LOCAL_DIR)
+    if local_ref != norm:
+        local_bin = Path(local_ref) / "model.bin"
         try:
             if local_bin.is_file():
                 return {
@@ -562,7 +566,8 @@ def _inspect_model_cache(model_name: str) -> Dict[str, Any]:
         except OSError:
             pass
 
-    model_dir = MODELS_DIR / f"models--Systran--faster-whisper-{model_name}"
+    repo_slug = custom_whisper.model_repo_id(norm).replace("/", "--")
+    model_dir = MODELS_DIR / f"models--{repo_slug}"
     if model_dir.is_dir():
         for snap in model_dir.glob("snapshots/*/model.bin"):
             try:
@@ -705,13 +710,46 @@ def snapshot() -> Dict[str, Any]:
     except Exception:
         hw_enc = None
 
-    cache_info = _inspect_model_cache(str(whisper_state.get("model") or WHISPER_MODEL))
+    from . import custom_whisper
+
+    if whisper_state.get("status") == "idle":
+        whisper_state["model"] = custom_whisper.get_active_model()
+
+    active_model_name = str(whisper_state.get("model") or WHISPER_MODEL)
+    cache_info = _inspect_model_cache(active_model_name)
+    dl_info = custom_whisper.get_download_info(active_model_name)
+    if (not dl_info or dl_info.get("state") != "downloading") and whisper_state.get("status") == "idle":
+        other_dl = custom_whisper.active_download_info()
+        if other_dl and other_dl.get("state") == "downloading":
+            dl_info = other_dl
+
+    if dl_info and dl_info.get("state") == "downloading":
+        cache_info["downloading"] = True
+        cache_info["download_model"] = dl_info.get("model")
+        cache_info["pct"] = dl_info.get("pct")
+        cache_info["eta_s"] = dl_info.get("eta_s")
+        cache_info["download_speed_mbps"] = dl_info.get("speed_mbps") or cache_info.get("download_speed_mbps") or 0.0
+        dl_mb = round((dl_info.get("downloaded_bytes") or 0) / 1048576.0, 1)
+        tot_mb = round((dl_info.get("total_bytes") or 0) / 1048576.0)
+        if dl_mb > float(cache_info.get("cache_mb") or 0.0):
+            cache_info["cache_mb"] = dl_mb
+        if tot_mb > 0:
+            cache_info["expected_mb"] = tot_mb
+
     if cache_info.get("downloading") and whisper_state.get("status") in ("idle", "loading"):
         whisper_state["status"] = "downloading"
     if whisper_state.get("status") == "idle" and whisper_state.get("device") == "auto":
         dev, comp = _resolved_idle_whisper()
         whisper_state["device"] = dev
         whisper_state["compute_type"] = comp
+
+    cuda_note = ""
+    try:
+        cuda_note = str(custom_whisper.cuda_diagnostics().get("reason") or "")
+    except Exception:
+        cuda_note = ""
+    if cuda_note and not whisper_state.get("fallback_reason"):
+        whisper_state["cuda_note"] = cuda_note
 
     active_projects = _collect_active_projects()
 

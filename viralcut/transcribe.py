@@ -36,6 +36,8 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 _MODEL = None
 _MODEL_LONG = None
+_MODEL_NAME: Optional[str] = None
+_MODEL_LONG_NAME: Optional[str] = None
 _MODEL_LOCK = threading.Lock()
 ProgressCb = Optional[Callable[[float, str], None]]
 
@@ -62,18 +64,11 @@ class TranscriptionError(Exception):
     pass
 
 
-def model_cached() -> bool:
+def model_cached(model_name: Optional[str] = None) -> bool:
     """Модель уже есть локально (внутри .app или в кэше — сеть не нужна)."""
-    if WHISPER_LOCAL_DIR and (Path(WHISPER_LOCAL_DIR) / "model.bin").is_file():
-        return True
-    try:
-        pattern = f"models--Systran--faster-whisper-{WHISPER_MODEL}"
-        for path in MODELS_DIR.glob(pattern + "/snapshots/*/model.bin"):
-            if path.stat().st_size > 1024 * 1024:
-                return True
-    except Exception:
-        pass
-    return False
+    from . import custom_whisper
+
+    return custom_whisper.is_model_cached(model_name)
 
 
 def model_available() -> bool:
@@ -85,35 +80,58 @@ def model_available() -> bool:
 
 
 def _reset_model(long_audio: bool = False) -> None:
-    global _MODEL, _MODEL_LONG
+    global _MODEL, _MODEL_LONG, _MODEL_NAME, _MODEL_LONG_NAME
     with _MODEL_LOCK:
         if long_audio and sys.platform == "darwin":
             _MODEL_LONG = None
+            _MODEL_LONG_NAME = None
         else:
             _MODEL = None
+            _MODEL_NAME = None
             if sys.platform != "darwin":
                 _MODEL_LONG = None
+                _MODEL_LONG_NAME = None
         gc.collect()
 
 
-def _get_model(long_audio: bool = False):
-    global _MODEL, _MODEL_LONG
+def _get_model(
+    long_audio: bool = False,
+    model_name: Optional[str] = None,
+    on_progress: ProgressCb = None,
+):
+    global _MODEL, _MODEL_LONG, _MODEL_NAME, _MODEL_LONG_NAME
+    from . import custom_debug, custom_whisper
+
+    target_model = (
+        custom_whisper.normalize_model_name(model_name)
+        if model_name
+        else custom_whisper.get_active_model()
+    )
     use_long_slot = bool(long_audio and sys.platform == "darwin")
     with _MODEL_LOCK:
-        if use_long_slot and _MODEL_LONG is not None:
+        if use_long_slot and _MODEL_LONG is not None and _MODEL_LONG_NAME == target_model:
             return _MODEL_LONG
-        if not use_long_slot and _MODEL is not None:
+        if not use_long_slot and _MODEL is not None and _MODEL_NAME == target_model:
             return _MODEL
-        from faster_whisper import WhisperModel
-        from . import custom_debug
-        from .custom_whisper import whisper_candidates
+        if use_long_slot and _MODEL_LONG is not None:
+            _MODEL_LONG = None
+            _MODEL_LONG_NAME = None
+            gc.collect()
+        elif not use_long_slot and _MODEL is not None:
+            _MODEL = None
+            _MODEL_NAME = None
+            gc.collect()
 
-        local_dir = Path(WHISPER_LOCAL_DIR) if WHISPER_LOCAL_DIR else None
-        model_ref = str(local_dir) if local_dir and (local_dir / "model.bin").is_file() else WHISPER_MODEL
-        candidates = whisper_candidates(use_long_slot, WHISPER_DEVICE, WHISPER_COMPUTE)
+        from faster_whisper import WhisperModel
+
+        model_ref = custom_whisper.resolve_model_ref(target_model, WHISPER_LOCAL_DIR)
+        if model_ref == target_model and not custom_whisper.is_model_cached(target_model):
+            custom_whisper.ensure_model_downloaded(target_model, on_progress=on_progress)
+
+        candidates = custom_whisper.whisper_candidates(use_long_slot, WHISPER_DEVICE, WHISPER_COMPUTE)
         custom_debug.record_whisper(
-            model=WHISPER_MODEL,
-            status="downloading" if not model_cached() else "loading",
+            model=target_model,
+            status="downloading" if not custom_whisper.is_model_cached(target_model) else "loading",
             fallback_reason="",
         )
         last_exc = None
@@ -128,7 +146,7 @@ def _get_model(long_audio: bool = False):
                 )
                 model._vc_device = device  # type: ignore[attr-defined]
                 custom_debug.record_whisper(
-                    model=WHISPER_MODEL, device=device, compute_type=compute, status="ready",
+                    model=target_model, device=device, compute_type=compute, status="ready",
                 )
                 break
             except Exception as exc:  # noqa: BLE001
@@ -144,8 +162,10 @@ def _get_model(long_audio: bool = False):
             )
         if use_long_slot:
             _MODEL_LONG = model
+            _MODEL_LONG_NAME = target_model
         else:
             _MODEL = model
+            _MODEL_NAME = target_model
         return model
 
 
@@ -381,7 +401,14 @@ def _split_audio(wav: Path, workdir: Path, chunk_seconds: int) -> tuple[List[tup
 
 
 def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
-               on_progress: ProgressCb = None) -> Dict[str, Any]:
+               on_progress: ProgressCb = None, model_name: Optional[str] = None) -> Dict[str, Any]:
+    from . import custom_whisper
+
+    target_model = (
+        custom_whisper.normalize_model_name(model_name)
+        if model_name
+        else custom_whisper.get_active_model()
+    )
     started = time.time()
     if on_progress:
         on_progress(0.005, "Подготовка звука для распознавания…")
@@ -404,7 +431,12 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
         long_audio = duration > trigger
         batched = (duration >= BATCH_MIN_SECONDS
                    and os.environ.get("VIRALCUT_WHISPER_BATCH", "1").strip() not in ("0", "false", "no", "off"))
-        model = _get_model(long_audio=long_audio)
+
+        def _dl_cb(frac: float, msg: str) -> None:
+            if on_progress:
+                on_progress(0.005 + max(0.0, min(1.0, frac)) * 0.035, msg)
+
+        model = _get_model(long_audio=long_audio, model_name=target_model, on_progress=_dl_cb)
         spans: List[tuple[Path, float, float]] = [(wav, 0.0, duration)]
         if duration > trigger:
             split, chunks_folder = _split_audio(wav, workdir, chunk_seconds)
@@ -429,7 +461,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                     # часть зависла (например, в драйвере Metal) — перезапускаем модель и идём дальше
                     print(f"whisper chunk {index} timed out; skipping", file=sys.stderr)
                     _reset_model(long_audio)
-                    model = _get_model(long_audio=long_audio)
+                    model = _get_model(long_audio=long_audio, model_name=target_model)
                     if on_progress:
                         on_progress(min(0.99, (offset + length) / max(1.0, duration)),
                                     f"Часть {index + 1} зависла · пропускаю")
@@ -479,7 +511,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
         "language": (detected_language or language or "ru"),
         "duration": duration,
         "segments": out,
-        "engine": f"whisper-{WHISPER_MODEL}",
+        "engine": f"whisper-{target_model}",
         "took": round(time.time() - started, 1),
         "quality": {
             "confidence": confidence,

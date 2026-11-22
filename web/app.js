@@ -359,6 +359,7 @@ function heroHTML() {
 
     <div class="group-title"><span>Параметры нарезки</span><span class="group-hint">всё можно поменять позже</span></div>
     <div class="options">
+      <div class="opt wide" id="vcWhisperSlot"></div>
       <div class="opt">
         ${optIcon("count", "ico-purple")}
         <span class="opt-label">Сколько нарезок</span>
@@ -522,6 +523,7 @@ function bindHero() {
   if (urlInput) urlInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submitLink(); });
   const uploadBtn = $("#uploadBtn");
   if (uploadBtn) uploadBtn.addEventListener("click", () => $("#fileInput").click());
+  if (window.vcWhisper) window.vcWhisper.mount("#vcWhisperSlot");
 }
 
 function heroOptions() {
@@ -541,7 +543,8 @@ function heroOptions() {
     sub_offset: state.opts.subOffset,
     sub_speed: state.opts.subSpeed,
     cookies_browser: state.opts.cookies,
-    language: "auto"
+    language: "auto",
+    whisper_model: window.vcWhisper ? window.vcWhisper.getSelected() : undefined
   };
 }
 
@@ -2059,16 +2062,18 @@ async function checkHealth() {
     const el = $("#health");
     el.classList.toggle("ok", !!h.ok);
     el.classList.toggle("bad", !h.ok);
+    const wm = h.whisper_model ? `Whisper ${h.whisper_model}` : "Whisper";
     $("#healthText").textContent = h.ok
       ? (h.model === false
-          ? "Готов · модель скачается при первом видео"
-          : `Движок готов · ffmpeg${h.whisper ? " · Whisper" : " · без Whisper"}`)
+          ? `Готов · ${wm} скачается при запуске`
+          : `Движок готов · ffmpeg${h.whisper ? ` · ${wm}` : " · без Whisper"}`)
       : "ffmpeg не найден";
   } catch (_) {
     $("#health").classList.add("bad");
     $("#healthText").textContent = "Сервер недоступен";
   }
 }
+window.vcCheckHealth = checkHealth;
 
 async function checkUpdates() {
   try {
