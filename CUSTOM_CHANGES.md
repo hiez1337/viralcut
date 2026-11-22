@@ -102,6 +102,35 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
   - Check `README.md` contains no stale `1.3.0` or `@ivanAI22` references and links only valid local paths and `hiez1337/viralcut` (with `vanwild11/viralcut` referenced solely for upstream attribution/updater explanation).
   - Verify `gh repo view hiez1337/viralcut --json defaultBranchRef,description,homepageUrl` shows `custom`, updated fork description, and empty `homepageUrl`.
 
+## Whisper `small` Default + UI Model Switcher (`small` / `medium` / `large-v3`) & Download Progress
+- **Goal**: Restore `small` as the default Whisper model (friendly for CPU and Lite builds), let users inspect model sizes/requirements upfront, switch between `small`, `medium`, and `large-v3` in the main UI (persisted to `data/whisper.json`), pre-download models with a live progress bar/speed/ETA, and safely fall back to CPU when CUDA/cuDNN DLLs are absent.
+- **New files**:
+  - `web/custom_whisper.css`, `web/custom_whisper.js`: self-contained model picker cards, status badges (`Готова` / `↓ ~XXX МБ` / `Загрузка XX%` / `Ошибка`), pre-download button, live progress bar, runtime GPU/CPU chip & warning note.
+- **Modified custom files**:
+  - `viralcut/custom_whisper.py`: sets `DEFAULT_WHISPER_MODEL = "small"`, adds `WHISPER_CATALOG`, `whisper.json` persistence (`resolve_whisper_model()`, `get_active_model()`, `set_active_model()`), `resolve_model_ref()`, safe `_cuda_dlls_available()` / `cuda_diagnostics()` check (including `sys._MEIPASS/nvidia/*/bin` and system `CUDA_PATH`), deduplicated `ensure_model_downloaded()` / `start_model_download()` with standalone `ProgressTqdm`, and `models_payload()`.
+  - `viralcut/custom_debug.py`, `web/custom_debug.js`: tracks active model dynamically while idle, enriches download telemetry with `pct` / `eta_s` / `download_model`, and displays `cuda_note` if CUDA DLLs are missing.
+  - `tests/test_custom_features.py`: adds `CustomWhisperTest`.
+- **Modified upstream files**:
+  - `viralcut/transcribe.py`: delegates `model_cached()` to `custom_whisper.is_model_cached()`, tracks loaded slot model name (`_MODEL_NAME`/`_MODEL_LONG_NAME`) to reload on model change, calls `ensure_model_downloaded()`, and supports `model_name` argument.
+  - `viralcut/pipeline.py`, `viralcut/live.py`: adds `whisper_model` option in `DEFAULT_OPTIONS` / `normalize_options()`, reports live model download progress before transcription, and passes `model_name` to `transcribe.transcribe()`.
+  - `viralcut/main.py`: adds `whisper_model` to `/api/health` and endpoints `GET /api/whisper/models`, `POST /api/whisper/model`, `POST /api/whisper/download`.
+  - `web/index.html`, `web/app.js`: mounts `#vcWhisperSlot` in `heroHTML()`/`bindHero()`, passes `whisper_model` in `heroOptions()`, and shows active model in `#healthText`.
+- **Verification**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v`.
+
+## Windows Lite Release Pipeline (No CUDA DLLs) & Beginner README Guide
+- **Goal**: Build and publish a compact Windows x64 Lite release (`ViralCut-*-windows-x64-lite.zip`) without bundled CUDA/cuDNN DLLs or embedded Whisper models, document all Lite limitations clearly, and provide beginner-friendly instructions with direct links to both the Lite release and `custom.zip` + `install_windows.bat`/`run_windows.bat` for full GPU acceleration.
+- **New files**:
+  - `ViralCut-lite.spec`: PyInstaller spec for Windows Lite build excluding `nvidia` and filtering out `cublas`/`cudnn`/`cudart`/`nvrtc` DLLs and `whisper-small` while keeping all `viralcut.*` submodules.
+  - `build_windows_lite.ps1`: isolated `.venv-build` setup from `requirements-desktop.txt`, unit test gate, PyInstaller build, DLL/model absence assertions, headless `ViralCut.exe` smoke test, ZIP packaging, and `SHA256SUMS.txt`.
+  - `.github/workflows/custom-release.yml`: manual `workflow_dispatch` GitHub Actions workflow mirroring the Lite build.
+  - `release/fork-v1.4.1-1/RELEASE_NOTES.md`, `release/fork-v1.4.1-1/SHA256SUMS.txt`: release notes and checksums for tag `fork-v1.4.1-1`.
+- **Modified files**:
+  - `README.md`, `CUSTOM_CHANGES.md`.
+- **Verification**:
+  - `powershell -ExecutionPolicy Bypass -File .\build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1`
+  - `gh release view fork-v1.4.1-1 --repo hiez1337/viralcut --json tagName,url,isLatest,assets`
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

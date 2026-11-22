@@ -11,12 +11,22 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/hiez1337/viralcut/releases/latest">
+    <img src="https://img.shields.io/badge/Скачать-Windows%20Lite%20.exe-8b5cf6?style=for-the-badge&logo=windows&logoColor=white" alt="Скачать Windows Lite">
+  </a>
+  &nbsp;
+  <a href="https://github.com/hiez1337/viralcut/archive/refs/heads/custom.zip">
+    <img src="https://img.shields.io/badge/Скачать-Архив%20custom%20(CUDA)-76B900?style=for-the-badge&logo=nvidia&logoColor=white" alt="Скачать архив custom (CUDA)">
+  </a>
+</p>
+
+<p align="center">
   <img src="https://img.shields.io/badge/Base-1.4.1-8b5cf6?style=flat-square" alt="Base 1.4.1">
   <img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&style=flat-square" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/NVIDIA-CUDA%20%2F%20NVENC-76B900?logo=nvidia&logoColor=white&style=flat-square" alt="NVIDIA CUDA / NVENC">
+  <img src="https://img.shields.io/badge/Whisper-Small%20%7C%20Medium%20%7C%20Large%20v3-ec4899?style=flat-square" alt="Whisper Small Medium Large v3">
   <img src="https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white&style=flat-square" alt="Python 3.12+">
-  <img src="https://img.shields.io/badge/macOS%20%2F%20Linux-source-4b5563?style=flat-square" alt="macOS / Linux">
 </p>
 
 <p align="center">
@@ -36,7 +46,7 @@
 </p>
 
 > **О репозитории:** это персональный форк [`hiez1337/viralcut`](https://github.com/hiez1337/viralcut) поверх оригинального [`vanwild11/viralcut`](https://github.com/vanwild11/viralcut) (база `1.4.1`).
-> Форк адаптирован под локальный запуск из исходников на **Windows 10/11 с GPU NVIDIA** (ориентир — Ryzen 7 5700X3D + RTX 4060 8 ГБ), но работает на любом ПК с Python 3.12+: при отсутствии NVIDIA CUDA автоматически используется `mps` (macOS) или `cpu`.
+> Форк адаптирован под Windows 10/11 с поддержкой GPU NVIDIA (CUDA + NVENC) и удобным выбором модели Whisper прямо в интерфейсе, но также работает на CPU и macOS/Linux.
 
 ---
 
@@ -44,7 +54,8 @@
 
 | Область | Что сделано в этом форке |
 |---|---|
-| **Whisper на CUDA + `large-v3`** | По умолчанию выбрана модель `large-v3` и приоритет `cuda` (`float16` → `int8_float16` → `cpu`), с автоматической регистрацией DLL из `nvidia-cublas-cu12` / `nvidia-cudnn-cu12` на Windows и единым слотом кеша модели (не тратит двойную VRAM). На системах без GPU срабатывает откат на `mps` / `cpu`, модель можно сменить через `VIRALCUT_WHISPER`. |
+| **Выбор модели Whisper в UI (`Small` / `Medium` / `Large v3`)** | По умолчанию используется быстрая **`small`** (~465 МБ) — подходит даже для CPU и лёгкой `.exe`-сборки. В интерфейсе на главном экране добавлен выбор **`Small`**, **`Medium`** (~1.46 ГБ) и **`Large v3`** (~2.95 ГБ): заранее видны размер, требования к VRAM/RAM, скорость и статус на диске, есть кнопка предзагрузки **«Скачать»** с живым прогресс-баром, скоростью и ETA. |
+| **CUDA-ускорение + безопасный CPU-откат** | При наличии видеокарты NVIDIA и библиотек CUDA (`nvidia-cublas-cu12` / `nvidia-cudnn-cu12` в версии через `run_windows.bat` или системных CUDA 12 + cuDNN 9) Whisper работает на `cuda` (`float16` → `int8_float16`). В лёгкой сборке без CUDA DLL выполнен безопасный откат на `cpu`, чтобы `ctranslate2` не падал. |
 | **Аппаратный рендер `h264_nvenc`** | Работает аппаратное кодирование (`nvenc` / `videotoolbox` / `qsv`) с исправленным откатом на `libx264`: при fallback сохраняются хвостовые параметры FFmpeg и не возникает блокировка чтения `stdout`. |
 | **YouTube 1080p в экономном режиме** | Исправлен выбор форматов и клиентов в [`custom_downloader.py`](viralcut/custom_downloader.py): строгий приоритет разрешения над контейнером/кодеком, перебор клиентов начиная с `default`, фиксация реального разрешения и причины отката, а также поддержка перерендера клипов из экономного режима. |
 | **Live-инспектор (`Ctrl+Shift+D`)** | Встроенная панель телеметрии в интерфейсе: загрузка GPU/VRAM и температура (`nvidia-smi`), CPU/RAM процесса и системы, статус/устройство Whisper и живой прогресс скачивания модели, клиент/формат YouTube с предупреждением об апскейле, активный этап и дочерние процессы `ffmpeg`. |
@@ -66,9 +77,9 @@
 
 ## Основные возможности
 
-- **Источники видео**: YouTube (до 1080p с встроенным PO-token провайдером), Twitch (VOD, клипы и прямые эфиры), TikTok, Instagram, VK, X (прямой HTTPS-поток без лишней пересборки HLS), прямые ссылки `mp4`/`m3u8`, загрузка локальных файлов (по умолчанию до 4 ГБ через `VIRALCUT_MAX_UPLOAD_GB`), а также импорт cookies из браузера для закрытых видео.
+- **Источники видео**: YouTube (до 1080p с встроенным PO-token провайдером при запуске из исходников), Twitch (VOD, клипы и прямые эфиры), TikTok, Instagram, VK, X (прямой HTTPS-поток без лишней пересборки HLS), прямые ссылки `mp4`/`m3u8`, загрузка локальных файлов (по умолчанию до 4 ГБ через `VIRALCUT_MAX_UPLOAD_GB`), а также импорт cookies из браузера для закрытых видео.
 - **Проверка качества и экономный режим**: перед скачиванием оцениваются доступные форматы и объём файла. В экономном режиме (автоматически включается для видео длиннее 10 минут) скачивается только аудио (~30–100 МБ), распознаётся речь, открывается предпросмотр, и видео тянется только для выбранных фрагментов; при этом готовые клипы в форке поддерживают перерендер.
-- **Распознавание речи**: локальный `faster-whisper` (по умолчанию `large-v3` на CUDA, `beam_size=5`, пачечное декодирование и разбивка длинных записей по чанкам) с таймингами каждого слова, автоповтором при сбое VAD и резервным чтением субтитров источника.
+- **Распознавание речи**: локальный `faster-whisper` с выбором модели в интерфейсе (`Small` по умолчанию, `Medium`, `Large v3`), `beam_size=5`, пачечным декодированием и разбивкой длинных записей по чанкам, таймингами каждого слова, автоповтором при сбое VAD и резервным чтением субтитров источника.
 - **Поиск вирусных моментов**: оценка по хуку в начале, плотности речи, паузам, громкости, эмоциям, конкретике, завершённости мысли и длительности с отсевом пересечений и повторов. До 50 нарезок за запуск.
 - **Умное кадрирование и звук**: форматы `9:16` (1080×1920), `1:1` (1080×1080), `4:5` (1080×1350) и `16:9` (1920×1080). Режимы: «умный кроп» по лицу (YuNet с плавным ведением и автооткатом на размытый фон при отсутствии лиц, например на скринкастах), «размытый фон» и «по центру». Громкость звука нормализуется до −14 LUFS.
 - **Караоке-субтитры ASS и редактор**:
@@ -82,42 +93,78 @@
 
 ## Установка и запуск
 
-> **Важно:** готовые `.exe` / `.app` архивы в этом форке не публикуются — запуск идёт из исходников (из ветки `custom`), чтобы использовать все модификации, CUDA-зависимости и патчи интерфейса. Если вам нужен готовый установщик **оригинальной** версии без изменений этого форка, см. раздел [Оригинальный проект](#оригинальный-проект-upstream-и-лицензия).
+Есть **два основных способа** запустить форк на Windows — выберите удобный для себя:
 
-Клонируйте форк (основная рабочая ветка по умолчанию — `custom`):
+| Способ | Кому подходит | Размер | Whisper на GPU (CUDA) |
+|---|---|---|---|
+| **1. Лёгкий релиз (`.exe`)** | Быстрый старт без установки Python | Компактный ZIP | Только если CUDA 12 + cuDNN 9 уже установлены в Windows; иначе **CPU** (`h264_nvenc` работает!) |
+| **2. Архив ветки `custom` + `.bat`** | Для видеокарт NVIDIA и максимальной скорости (`Medium` / `Large v3` на GPU) | Исходники + автоскачка в `.venv-win` | **Да**, `nvidia-cublas-cu12` и `nvidia-cudnn-cu12` ставятся автоматически |
+
+---
+
+### Способ 1 — Готовый лёгкий релиз для Windows (`.exe`, без Python)
+
+1. Перейдите на страницу последнего релиза: **[Скачать последний релиз (Windows x64 Lite)](https://github.com/hiez1337/viralcut/releases/latest)**.
+2. Скачайте файл `ViralCut-...-windows-x64-lite.zip` из блока **Assets**.
+3. Распакуйте архив в удобную папку (желательно с латинским путём, например `C:\ViralCut`).
+4. Запустите **`ViralCut.exe`** внутри распакованной папки.
+
+> #### Ограничения лёгкой сборки (без CUDA DLL)
+> 1. **Whisper работает на CPU** (если на компьютере отдельно не установлены системные CUDA Toolkit 12 и cuDNN 9). Для процессора комфортнее всего использовать модель **`Small`** (она выбрана по умолчанию); тяжёлые **`Medium`** и **`Large v3`** на CPU будут работать заметно медленнее. При этом аппаратное кодирование видео **`h264_nvenc`** на картах NVIDIA **всё равно работает** через обычный видеодрайвер. Если вам нужно ускорение Whisper на GPU — используйте [Способ 2](#способ-2--полная-версия-с-cuda-gpu-из-архива-ветки-custom-через-bat).
+> 2. **Модели Whisper не вшиты в архив** — в интерфейсе вы заранее видите статус каждой модели (`Small` ~465 МБ, `Medium` ~1.46 ГБ, `Large v3` ~2.95 ГБ) и можете скачать нужную кнопкой **«Скачать»** или автоматически при первом запуске.
+> 3. **Предупреждение Windows SmartScreen** — `.exe` не подписан платным сертификатом, поэтому при первом запуске Windows может показать синее окно защиты: нажмите **«Подробнее» → «Выполнить в любом случае»**.
+> 4. **Требуется WebView2 Runtime** — в Windows 11 и обновлённой Windows 10 он уже установлен; если окно не открывается, скачайте [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/).
+> 5. **Node/PO-token провайдер не вшит** — если YouTube ограничивает доступ или качество, выберите **«Cookies из браузера»** в параметрах проекта.
+
+---
+
+### Способ 2 — Полная версия с CUDA (GPU) из архива ветки `custom` через `.bat`
+
+Самый простой способ получить **полную версию с NVIDIA CUDA-ускорением**, без Git и командной строки:
+
+1. Скачайте готовый ZIP-архив основной ветки форка по прямой ссылке:
+   **[Скачать архив ветки `custom` (ZIP)](https://github.com/hiez1337/viralcut/archive/refs/heads/custom.zip)**
+   *(это то же самое, что нажать зелёную кнопку `<> Code → Download ZIP` на главной странице репозитория).*
+2. Распакуйте архив в папку с коротким латинским путём без пробелов, например **`C:\viralcut`** (внутри будет лежать файл `run_windows.bat`).
+3. **Если Python 3.12 ещё не установлен** (или вы не уверены, есть ли он):
+   - Дважды кликните по **`install_windows.bat`**.
+   - Скрипт автоматически установит **Python 3.12** и **WebView2 Runtime** через встроенный в Windows менеджер `winget`, а затем сам запустит `run_windows.bat`.
+4. **Если Python 3.12 x64 уже установлен** (и для всех **последующих** запусков):
+   - Дважды кликните по **`run_windows.bat`**.
+5. **Что произойдёт при первом запуске через `run_windows.bat`:**
+   - Скрипт сам создаст изолированное окружение `.venv-win` внутри папки с программой, установит все зависимости из [`requirements-custom.txt`](requirements-custom.txt) (включая `pywebview`, `nvidia-cublas-cu12` и `nvidia-cudnn-cu12`) и откроет окно **ViralCut**.
+   - **Первый запуск займёт 3–5 минут** из-за скачивания CUDA-библиотек — просто не закрывайте чёрное окно консоли, пока не откроется приложение. Все последующие запуски проходят за пару секунд.
+   - Для удобства можно кликнуть правой кнопкой по `run_windows.bat` → *Отправить → Рабочий стол (создать ярлык)*.
+
+---
+
+### Способ 3 — Для разработчиков (`git clone`, браузерный режим и macOS / Linux)
+
+Клонирование через Git (ветка `custom` стоит по умолчанию):
 
 ```bash
 git clone https://github.com/hiez1337/viralcut.git
 cd viralcut
 ```
 
-### Windows 10/11 — Desktop-окно (рекомендуется)
+#### Windows 10/11 — Desktop или Браузерный режим
 
-1. Если Python 3.12 и WebView2 ещё не установлены — запустите `install_windows.bat` (поставит их через `winget` и передаст управление в `run_windows.bat`).
-2. Если Python 3.12 x64 уже установлен — просто запустите `run_windows.bat`.
+- Desktop-окно: запустите `run_windows.bat`.
+- Браузерный режим (после создания `.venv-win`):
+  ```powershell
+  .\.venv-win\Scripts\python.exe -m viralcut --host 127.0.0.1 --port 8765
+  ```
+  Откройте в браузере: <http://127.0.0.1:8765>.
 
-Скрипт сам создаст `.venv-win`, установит зависимости из [`requirements-custom.txt`](requirements-custom.txt) (включая `pywebview`, `nvidia-cublas-cu12` и `nvidia-cudnn-cu12`) и откроет настольное окно приложения.
-
-### Windows 10/11 — Браузерный режим
-
-После создания `.venv-win` (через `run_windows.bat` или вручную):
-
-```powershell
-.\.venv-win\Scripts\python.exe -m viralcut --host 127.0.0.1 --port 8765
-```
-
-Откройте в браузере: <http://127.0.0.1:8765>
-
-### macOS / Linux — Браузерный режим
+#### macOS / Linux — Браузерный режим
 
 ```bash
 ./run.sh
 ```
 
 Скрипт создаст `.venv`, поставит зависимости из [`requirements.txt`](requirements.txt) и запустит сервер на <http://127.0.0.1:8765>.
-На системах без NVIDIA GPU при первом запуске можно выбрать более лёгкую модель Whisper (например, `VIRALCUT_WHISPER=small ./run.sh`).
 
-> **Первый запуск:** модель `large-v3` (~2.95 ГБ) скачивается с HuggingFace автоматически при первой обработке. Статус и скорость скачивания в реальном времени видны в Инспекторе. Статический бинарник `ffmpeg` подтягивается автоматически через `imageio-ffmpeg`.
+> **Первый запуск моделей:** модель по умолчанию **`small`** (~465 МБ), а также **`medium`** (~1.46 ГБ) и **`large-v3`** (~2.95 ГБ) можно скачать заранее прямо на главном экране кнопкой **«Скачать»** с живым прогресс-баром, либо они скачаются автоматически при первом видео. Статический бинарник `ffmpeg` подтягивается автоматически через `imageio-ffmpeg`.
 
 ---
 
@@ -125,7 +172,7 @@ cd viralcut
 
 Панель **«Инспектор»** открывается кнопкой рядом со статусом внизу левой панели, кликом по самому статусу или горячей клавишей **`Ctrl+Shift+D`**.
 
-- **Телеметрия в реальном времени**: загрузка GPU, занятая/общая VRAM, температура (через `nvidia-smi`), загрузка CPU и RAM (процесс и система), текущая модель/устройство Whisper и скорость скачивания кеша, выбранный YouTube-клиент, формат/разрешение источника, предупреждение об апскейле, таймер активного этапа и список запущенных процессов `ffmpeg`.
+- **Телеметрия в реальном времени**: загрузка GPU, занятая/общая VRAM, температура (через `nvidia-smi`), загрузка CPU и RAM (процесс и система), активная модель/устройство Whisper и прогресс скачивания кеша (проценты, скорость, ETA), предупреждение при запуске без CUDA DLL, выбранный YouTube-клиент, формат/разрешение источника, предупреждение об апскейле, таймер активного этапа и список запущенных процессов `ffmpeg`.
 - **Диск и очистка**: показывает место, занятое категориями **Готовые клипы**, **Временные**, **Исходники** и **Модели Whisper**:
   - **«Очистить временные»** (без подтверждения) — удаляет промежуточные файлы (`audio16k.wav`, `whisper_chunks_*`, `sections/`, `win_*.wav`, `src_*.mp4`, `viralcut_*.zip`, `.part`/`.tmp`), осиротевшие папки, а также `preview.mp4` и аудио экономного режима завершённых проектов.
   - **«Удалить исходники»** (с подтверждением) — удаляет скачанные `source.*` и сегменты стримов завершённых, отменённых и упавших проектов. После этого их готовые клипы остаются на месте, но повторный перерендер полного исходника без повторного скачивания будет недоступен.
@@ -144,16 +191,16 @@ cd viralcut
 
 ## Настройки
 
-Основные переменные окружения, актуальные для этого форка:
+Выбранная в интерфейсе модель Whisper сохраняется в `data/whisper.json`. Переменная `VIRALCUT_WHISPER`, если задана, имеет приоритет над сохранённым выбором.
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `VIRALCUT_HOST` | `127.0.0.1` | Адрес привязки HTTP-сервера |
 | `VIRALCUT_PORT` | `8765` | Порт HTTP-сервера |
-| `VIRALCUT_DATA` | `./data` *(веб)* / `%APPDATA%\ViralCut` *(Win Desktop)* | Папка с проектами, клипами, моделями и БД |
-| `VIRALCUT_WHISPER` | `large-v3` | Модель Whisper: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` |
+| `VIRALCUT_DATA` | `./data` *(веб)* / `%APPDATA%\ViralCut` *(Desktop)* | Папка с проектами, клипами, моделями, `whisper.json` и БД |
+| `VIRALCUT_WHISPER` | `small` *(либо выбор в UI)* | Модель Whisper: `tiny`, `base`, `small`, `medium`, `large-v3`, `large-v3-turbo` |
 | `VIRALCUT_WHISPER_DIR` | *(пусто)* | Путь к заранее скачанной локальной модели Whisper |
-| `VIRALCUT_DEVICE` | `auto` | Устройство распознавания: `auto` (`cuda` → `cpu` на Win/Linux; `mps` → `cpu` на macOS), либо принудительно `cuda` / `cpu` / `mps` |
+| `VIRALCUT_DEVICE` | `auto` | Устройство распознавания: `auto` (`cuda` при наличии DLL → `cpu` на Win/Linux; `mps` → `cpu` на macOS), либо принудительно `cuda` / `cpu` / `mps` |
 | `VIRALCUT_COMPUTE` | `int8` *(для CPU)* | Тип вычислений при ручном выборе устройства (в `cuda` + `auto` перебирается `float16` → `int8_float16`) |
 | `VIRALCUT_WHISPER_BEAM` | `5` | Размер beam-search при декодировании |
 | `VIRALCUT_WHISPER_BATCH` | `1` | Пачечное декодирование (`0` отключает) |
@@ -169,8 +216,8 @@ cd viralcut
 
 ## Где лежат данные и готовые клипы
 
-- **Браузерный режим (`python -m viralcut` / `./run.sh`)**: всё хранится в `./data/` (`data/projects/<id>/clips/`, модели в `data/models/`, пользовательские шрифты в `data/fonts/`, БД в `data/viralcut.db`).
-- **Windows Desktop (`run_windows.bat`)**:
+- **Браузерный режим (`python -m viralcut` / `./run.sh`)**: всё хранится в `./data/` (`data/projects/<id>/clips/`, модели в `data/models/`, выбранная модель в `data/whisper.json`, пользовательские шрифты в `data/fonts/`, БД в `data/viralcut.db`).
+- **Windows Desktop (`ViralCut.exe` и `run_windows.bat`)**:
   - рабочие данные и логи: `%APPDATA%\ViralCut` (лог: `%APPDATA%\ViralCut\app.log`);
   - файлы, сохранённые кнопками **«MP4»** и **«Скачать всё»**: `%USERPROFILE%\Downloads\ViralCut` (либо выбранная папка в диалоге сохранения).
 - **macOS Desktop**: данные в `~/Library/Application Support/ViralCut`, экспорт — в `~/Downloads/ViralCut`.
@@ -183,11 +230,11 @@ cd viralcut
 ссылка / файл
    │  yt-dlp (+ PO-token / custom_downloader)
    ▼
-source.mp4 / audio ──► faster-whisper (CUDA large-v3) ──► слова с таймингами
-   │                                                           │
-   │                                                    анализ моментов
-   │                                                           │
-   └─────────────────────────► ffmpeg (NVENC/x264) ◄──── клипы + ASS-субтитры
+source.mp4 / audio ──► faster-whisper (Small / Medium / Large v3) ──► слова с таймингами
+   │                                                                         │
+   │                                                                  анализ моментов
+   │                                                                         │
+   └─────────────────────────► ffmpeg (NVENC/x264) ◄────────────────── клипы + ASS-субтитры
                                    │
                                    ▼
                      1080×1920 MP4, AAC 192k, -14 LUFS
@@ -199,31 +246,37 @@ source.mp4 / audio ──► faster-whisper (CUDA large-v3) ──► слова
 
 ```
 viralcut/
-  main.py              FastAPI: API, статика и lifecycle
-  pipeline.py          оркестрация скачивания, анализа и рендера
-  downloader.py        yt-dlp, PO-token, прямые ссылки и cookies
-  transcribe.py        faster-whisper + резервные субтитры
-  analyze.py           поиск и скоринг вирусных моментов
-  reframe.py           умный кроп по лицам (YuNet)
-  subtitles.py         генерация ASS и SRT
-  render.py            FFmpeg: кадрирование, субтитры, нормализация
-  live.py              обработка прямых эфиров
-  db.py / jobs.py      SQLite и фоновая очередь задач
-  custom_whisper.py    [fork] CUDA + large-v3 по умолчанию и DLL на Windows
-  custom_downloader.py [fork] приоритет 1080p, перебор клиентов и экономный перерендер
-  custom_debug.py      [fork] сборщик телеметрии GPU/CPU/RAM/Whisper/FFmpeg
-  custom_cleanup.py    [fork] учёт диска и безопасная очистка temp/sources
-  custom_updater.py    [fork] отключение автообновы по умолчанию
-  custom_fonts.py      [fork] пользовательские TTF/OTF и потокобезопасный sync
-web/                   веб-интерфейс без сборки (app.js, styles.css, index.html)
-  custom_debug.js/css  [fork] UI Инспектора, карточки диска и тумблера автообновы
-desktop/               оболочка pywebview для Windows / macOS
+  main.py                    FastAPI: API, статика и lifecycle
+  pipeline.py                оркестрация скачивания, анализа и рендера
+  downloader.py              yt-dlp, PO-token, прямые ссылки и cookies
+  transcribe.py              faster-whisper + резервные субтитры
+  analyze.py                 поиск и скоринг вирусных моментов
+  reframe.py                 умный кроп по лицам (YuNet)
+  subtitles.py               генерация ASS и SRT
+  render.py                  FFmpeg: кадрирование, субтитры, нормализация
+  live.py                    обработка прямых эфиров
+  db.py / jobs.py            SQLite и фоновая очередь задач
+  custom_whisper.py          [fork] каталог моделей, выбор, скачивание с прогрессом, проверка CUDA DLL
+  custom_downloader.py       [fork] приоритет 1080p, перебор клиентов и экономный перерендер
+  custom_debug.py            [fork] сборщик телеметрии GPU/CPU/RAM/Whisper/FFmpeg
+  custom_cleanup.py          [fork] учёт диска и безопасная очистка temp/sources
+  custom_updater.py          [fork] отключение автообновы по умолчанию
+  custom_fonts.py            [fork] пользовательские TTF/OTF и потокобезопасный sync
+web/                         веб-интерфейс без сборки (app.js, styles.css, index.html)
+  custom_whisper.js/css      [fork] выбор модели Whisper (Small/Medium/Large v3) и прогресс-бар
+  custom_debug.js/css        [fork] UI Инспектора, карточки диска и тумблера автообновы
+desktop/                     оболочка pywebview для Windows / macOS
 tests/
-  test_analyze.py      базовые тесты анализатора и SRT
-  test_custom_features.py [fork] тесты загрузчика, Инспектора, очистки, БД и рендера
-AGENTS.md              правила ведения форка и синхронизации с upstream
-CUSTOM_CHANGES.md      полный журнал модификаций форка
-requirements-custom.txt [fork] зависимости Desktop + CUDA для Windows
+  test_analyze.py            базовые тесты анализатора и SRT
+  test_custom_features.py    [fork] тесты моделей Whisper, загрузчика, Инспектора, очистки, БД и рендера
+ViralCut-lite.spec           [fork] конфиг PyInstaller для лёгкого Windows-релиза без CUDA DLL
+build_windows_lite.ps1       [fork] локальная сборка + smoke-test + упаковка Lite-релиза
+.github/workflows/
+  custom-release.yml         [fork] ручная сборка Lite-релиза в GitHub Actions
+release/fork-v1.4.1-1/       описание и контрольные суммы релиза fork-v1.4.1-1
+AGENTS.md                    правила ведения форка и синхронизации с upstream
+CUSTOM_CHANGES.md            полный журнал модификаций форка
+requirements-custom.txt      [fork] зависимости Desktop + CUDA для Windows
 ```
 
 ---
@@ -232,7 +285,10 @@ requirements-custom.txt [fork] зависимости Desktop + CUDA для Wind
 
 | Метод | Путь | Назначение |
 |---|---|---|
-| `GET` | `/api/health` | Состояние движка, версия и доступность зависимостей |
+| `GET` | `/api/health` | Состояние движка, активная модель Whisper, версия и доступность зависимостей |
+| `GET` | `/api/whisper/models` | Каталог моделей (`small`, `medium`, `large-v3`), статус на диске и прогресс загрузки |
+| `POST` | `/api/whisper/model` | Выбор активной модели Whisper: `{"model": "small" \| "medium" \| "large-v3"}` |
+| `POST` | `/api/whisper/download` | Фоновая предзагрузка выбранной модели Whisper с отслеживанием прогресса |
 | `GET` | `/api/debug` | Живая телеметрия GPU/CPU/RAM, Whisper, YouTube и сводка по диску |
 | `POST` | `/api/debug/cleanup` | Безопасная очистка: `{"scope": "temp"}` или `{"scope": "sources"}` |
 | `GET` | `/api/update` | Статус проверки обновлений |
@@ -261,11 +317,17 @@ requirements-custom.txt [fork] зависимости Desktop + CUDA для Wind
 
 *(На macOS / Linux: `python3 -m unittest discover -s tests -v`. Тесты из `test_reframe.py` автоматически пропускаются при отсутствии промо-роликов.)*
 
+Сборка лёгкого Windows-релиза локально:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1
+```
+
 Структура веток форка:
 - **`custom`** *(основная ветка по умолчанию)* — все персональные изменения, фиксы и новые модули;
 - **`main`** — чистое зеркало `upstream/main` без пользовательских коммитов.
 
-Порядок минимальных патчей и синхронизации с обновлениями автора описан в [`AGENTS.md`](AGENTS.md), а детали каждого изменения — в [`CUSTOM_CHANGES.md`](CUSTOM_CHANGES.md). Скрипты `build_windows.ps1`, `build_app.sh` и workflow в `.github/workflows/build.yml` унаследованы от upstream и ориентированы на сборку базовой версии с `requirements-desktop.txt`.
+Порядок минимальных патчей и синхронизации с обновлениями автора описан в [`AGENTS.md`](AGENTS.md), а детали каждого изменения — в [`CUSTOM_CHANGES.md`](CUSTOM_CHANGES.md). Скрипты `build_windows.ps1`, `build_app.sh`, `ViralCut.spec` и `.github/workflows/build.yml` унаследованы от upstream и не модифицируются форком.
 
 ---
 

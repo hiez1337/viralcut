@@ -1,0 +1,89 @@
+name: Build Fork Lite (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Версия для имени архива (например, 1.4.1-fork.1)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  windows-lite:
+    name: Windows 10/11 x64 Lite (no CUDA DLL)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-desktop.txt pyinstaller
+
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $inputVer = "${{ github.event.inputs.version }}".Trim()
+          if ($inputVer) {
+            $v = $inputVer
+          } else {
+            $v = "$(python tools/version.py)-fork"
+          }
+          "value=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build Lite exe
+        run: pyinstaller ViralCut-lite.spec --noconfirm --clean
+
+      - name: Verify no CUDA DLLs or bundled models
+        shell: pwsh
+        run: |
+          $cudaHits = Get-ChildItem "dist\ViralCut" -Recurse -File -Include "*cublas*", "*cudnn*", "*nvrtc*", "*cudart*"
+          if ($cudaHits) { throw "Found unexpected CUDA DLLs in lite build" }
+          if (Test-Path "dist\ViralCut\_internal\models\whisper-small") { throw "Found bundled whisper-small" }
+
+      - name: Smoke test (headless HTTP)
+        shell: pwsh
+        run: |
+          $env:VIRALCUT_HEADLESS = "1"
+          $env:VIRALCUT_DATA = "$env:RUNNER_TEMP\vc-lite-smoke"
+          $env:VIRALCUT_PORT = "8799"
+          $env:VIRALCUT_UPDATE_CHECK = "0"
+          $proc = Start-Process -FilePath "dist\ViralCut\ViralCut.exe" -PassThru
+          $ok = $false
+          for ($i = 0; $i -lt 80; $i++) {
+            Start-Sleep -Milliseconds 500
+            try {
+              $r = Invoke-RestMethod "http://127.0.0.1:8799/api/health" -TimeoutSec 2
+              if ($r.ok -eq $true -and $r.whisper_model -eq "small") { $ok = $true; break }
+            } catch { }
+          }
+          if (-not $ok) {
+            if (Test-Path "$env:VIRALCUT_DATA\app.log") { Get-Content "$env:VIRALCUT_DATA\app.log" }
+            throw "ViralCut.exe did not respond cleanly on /api/health"
+          }
+          Stop-Process -Id $proc.Id -Force
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $zip = "ViralCut-${{ steps.version.outputs.value }}-windows-x64-lite.zip"
+          Compress-Archive -Path dist\ViralCut -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Out-File -Encoding ascii SHA256SUMS-windows-lite.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-lite-zip
+          path: |
+            ViralCut-*-windows-x64-lite.zip
+            SHA256SUMS-windows-lite.txt
