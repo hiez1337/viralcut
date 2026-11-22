@@ -635,14 +635,24 @@ def _collect_active_projects() -> List[Dict[str, Any]]:
     projects: List[Dict[str, Any]] = []
 
     for pid in active_ids:
-        proj = db.get_project(pid)
+        try:
+            proj = db.get_project(pid)
+        except Exception:
+            proj = None
         if proj:
             projects.append(proj)
 
-    for item in db.list_projects(12):
+    try:
+        recent_items = db.list_projects(12)
+    except Exception:
+        recent_items = []
+    for item in recent_items:
         if item["id"] not in seen and item.get("status") in ("queued", "preparing", "running"):
             seen.add(item["id"])
-            proj = db.get_project(item["id"]) or item
+            try:
+                proj = db.get_project(item["id"]) or item
+            except Exception:
+                proj = item
             projects.append(proj)
 
     now = time.time()

@@ -34,6 +34,28 @@ from viralcut import (
 )
 
 
+_MODULE_TMPDIR = None
+_ORIG_DB_PATH = None
+
+
+def setUpModule():
+    global _MODULE_TMPDIR, _ORIG_DB_PATH
+    _MODULE_TMPDIR = tempfile.TemporaryDirectory(prefix="vc-custom-tests-")
+    _ORIG_DB_PATH = db.DB_PATH
+    db.DB_PATH = Path(_MODULE_TMPDIR.name) / "viralcut.db"
+    db.init_db()
+
+
+def tearDownModule():
+    global _MODULE_TMPDIR, _ORIG_DB_PATH
+    if _ORIG_DB_PATH is not None:
+        db.DB_PATH = _ORIG_DB_PATH
+        _ORIG_DB_PATH = None
+    if _MODULE_TMPDIR is not None:
+        _MODULE_TMPDIR.cleanup()
+        _MODULE_TMPDIR = None
+
+
 class PickBestFormatTest(unittest.TestCase):
     def test_prefers_1080p_over_360p_muxed(self):
         info = {
@@ -515,9 +537,12 @@ class CustomWhisperTest(unittest.TestCase):
             data_dir = Path(tmp)
             models_dir = data_dir / "models"
             models_dir.mkdir()
+            db_path = data_dir / "viralcut.db"
             with mock.patch.object(config, "DATA_DIR", data_dir), \
                  mock.patch.object(config, "MODELS_DIR", models_dir), \
+                 mock.patch.object(db, "DB_PATH", db_path), \
                  mock.patch.dict(os.environ, {}, clear=False):
+                db.init_db()
                 os.environ.pop("VIRALCUT_WHISPER", None)
                 custom_whisper._RUNTIME_MODEL = None
                 self.assertEqual(custom_whisper.resolve_whisper_model(), "small")
