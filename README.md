@@ -40,7 +40,9 @@
   &nbsp;·&nbsp;
   <a href="#api">API</a>
   &nbsp;·&nbsp;
-  <a href="CUSTOM_CHANGES.md">Журнал изменений</a>
+  <a href="CUSTOM_CHANGES_ru.md">Журнал изменений (RU)</a>
+  &nbsp;·&nbsp;
+  <a href="CUSTOM_CHANGES.md">Changelog (EN)</a>
   &nbsp;·&nbsp;
   <a href="#оригинальный-проект-upstream-и-лицензия">Оригинальный проект</a>
 </p>
@@ -275,7 +277,8 @@ build_windows_lite.ps1       [fork] локальная сборка + smoke-test
   custom-release.yml         [fork] ручная сборка Lite-релиза в GitHub Actions
 release/fork-v1.4.1-1/       описание и контрольные суммы релиза fork-v1.4.1-1
 AGENTS.md                    правила ведения форка и синхронизации с upstream
-CUSTOM_CHANGES.md            полный журнал модификаций форка
+CUSTOM_CHANGES.md            полный журнал модификаций форка (EN)
+CUSTOM_CHANGES_ru.md         полный журнал модификаций форка (RU)
 requirements-custom.txt      [fork] зависимости Desktop + CUDA для Windows
 ```
 
@@ -327,7 +330,7 @@ powershell -ExecutionPolicy Bypass -File .\build_windows_lite.ps1 -Tag fork-v1.4
 - **`custom`** *(основная ветка по умолчанию)* — все персональные изменения, фиксы и новые модули;
 - **`main`** — чистое зеркало `upstream/main` без пользовательских коммитов.
 
-Порядок минимальных патчей и синхронизации с обновлениями автора описан в [`AGENTS.md`](AGENTS.md), а детали каждого изменения — в [`CUSTOM_CHANGES.md`](CUSTOM_CHANGES.md). Скрипты `build_windows.ps1`, `build_app.sh`, `ViralCut.spec` и `.github/workflows/build.yml` унаследованы от upstream и не модифицируются форком.
+Порядок минимальных патчей и синхронизации с обновлениями автора описан в [`AGENTS.md`](AGENTS.md), а детали каждого изменения — в [`CUSTOM_CHANGES_ru.md`](CUSTOM_CHANGES_ru.md) (на русском) или [`CUSTOM_CHANGES.md`](CUSTOM_CHANGES.md) (на английском). Скрипты `build_windows.ps1`, `build_app.sh`, `ViralCut.spec` и `.github/workflows/build.yml` унаследованы от upstream и не модифицируются форком.
 
 ---
 

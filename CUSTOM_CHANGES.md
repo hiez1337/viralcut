@@ -1,5 +1,7 @@
 # Custom Changes Log
 
+*[Русская версия / Russian translation: [CUSTOM_CHANGES_ru.md](CUSTOM_CHANGES_ru.md)]*
+
 Track all personal modifications made on top of `upstream/main` (`vanwild11/viralcut`) here.
 When upstream makes major refactors, an LLM agent can use this log to re-apply or adapt our features cleanly onto the new `main`.
 
@@ -130,6 +132,17 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
 - **Verification**:
   - `powershell -ExecutionPolicy Bypass -File .\build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1`
   - `gh release view fork-v1.4.1-1 --repo hiez1337/viralcut --json tagName,url,isLatest,assets`
+
+## Russian Changelog (`CUSTOM_CHANGES_ru.md`) & GitHub Issues / Discussions Enablement
+- **Goal**: Enable GitHub Issues and Discussions on `hiez1337/viralcut` via GitHub CLI so users can report bugs, suggest features, and ask questions. Provide a complete Russian translation of the custom changes log (`CUSTOM_CHANGES_ru.md`) alongside `CUSTOM_CHANGES.md`.
+- **New files**:
+  - `CUSTOM_CHANGES_ru.md`: full Russian translation and duplicate of `CUSTOM_CHANGES.md`.
+- **Modified files**:
+  - `CUSTOM_CHANGES.md`: cross-linked Russian translation.
+  - `README.md`: added direct links to both Russian and English changelogs in the navigation bar and repository structure.
+- **Verification**:
+  - `gh repo view hiez1337/viralcut --json hasIssuesEnabled,hasDiscussionsEnabled` returns `true` for both.
+  - Verify links between `README.md`, `CUSTOM_CHANGES.md`, and `CUSTOM_CHANGES_ru.md`.
 
 <!-- Template for future changes:
 ## [Feature / Fix Name]
