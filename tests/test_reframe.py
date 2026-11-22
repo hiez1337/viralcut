@@ -47,3 +47,32 @@ class CropPathTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class PathStabilityTest(unittest.TestCase):
+    """Путь окна не должен дёргаться и не должен быть «простынёй» для ffmpeg."""
+
+    def _path(self, name: str, duration: float = 20.0):
+        src = STOCK / name
+        if not src.exists():
+            self.skipTest(f"нет файла {src}")
+        return reframe.build_crop_path(src, 0.0, duration, aspect="9:16")
+
+    def test_path_is_compact_for_ffmpeg(self):
+        path = self._path("2948-1080.mp4", duration=30.0)
+        expr_x, expr_y = reframe.crop_expressions(path)
+        self.assertLess(len(expr_x), 2000, "x-выражение длиннее лимита ffmpeg")
+        self.assertLess(len(expr_y), 2000)
+        self.assertLessEqual(len(path["x"]), 140)
+
+    def test_no_ping_pong_between_speakers(self):
+        path = self._path("2948-1080.mp4")
+        span = max(path["x"]) - min(path["x"])
+        self.assertLess(span, 300.0, "окно гуляет между людьми на всю ширину кадра")
+        steps = [abs(path["x"][i + 1] - path["x"][i]) for i in range(len(path["x"]) - 1)]
+        self.assertLess(max(steps), 120.0)
+
+    def test_dense_enough_for_smoothness(self):
+        path = self._path("52175-1080.mp4")
+        gap = max(path["times"][i + 1] - path["times"][i] for i in range(len(path["times"]) - 1))
+        self.assertLess(gap, 2.0, "слишком редкие keyframe — движение будет ступеньками")

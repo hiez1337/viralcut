@@ -966,10 +966,18 @@ function qualityText(project) {
 
 function fallbackHTML(project) {
   const m = project.meta || {};
-  if (!m.fallback) return "";
-  const reason = m.fallback_reason ? esc(String(m.fallback_reason)) : "источник отклонил загрузку";
-  return `<div class="warn-box"><strong>1080p не удалось.</strong> ${reason}. Сейчас используется ${m.source_height || "?"}p.
-    <button class="link-btn" data-action="retry-hd">Повторить в 1080p</button></div>`;
+  if (m.fallback) {
+    const reason = m.fallback_reason ? esc(String(m.fallback_reason)) : "источник отклонил загрузку";
+    return `<div class="warn-box"><strong>1080p не удалось.</strong> ${reason}. Сейчас используется ${m.source_height || "?"}p.
+      <button class="link-btn" data-action="retry-hd">Повторить в 1080p</button></div>`;
+  }
+  // экономный режим собрал клипы из фрагментов ниже 1080p — даём кнопку пересборки
+  const econHeight = Number(m.max_height || (project.options && project.options.max_height) || 0);
+  if (m.segments_mode && econHeight < 1080) {
+    return `<div class="warn-box">Клипы собраны из фрагментов ${econHeight || 360}p.
+      <button class="link-btn" data-action="retry-hd">Пересобрать в 1080p</button></div>`;
+  }
+  return "";
 }
 
 function streamHomeHTML() {
@@ -1283,7 +1291,7 @@ $("#main").addEventListener("click", async (e) => {
   if (action === "retry-hd") {
     if (!state.detail) return;
     try {
-      toast("Повторяю загрузку в 1080p…");
+      toast("Пересобираю клипы в 1080p…");
       await api(`/api/projects/${state.detail.project.id}/retry`, {
         method: "POST",
         body: JSON.stringify({ force_hd: true })

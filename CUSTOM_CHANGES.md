@@ -158,6 +158,16 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (all tests including upstream `tests/test_render.py` pass).
   - Verify green `Fork CI (Tests)` check on PR into `custom`.
 
+## Upstream `v1.4.3` Sync (Smooth Reframing, Eco Full HD Rebuild & Direct-URL Sections)
+- **Goal**: Merge upstream `vanwild11/viralcut` `v1.4.3` (smooth 3 fps + median-5 + deadband + Douglas–Peucker reframing fixing long-clip FFmpeg failures, one-click 1080p rebuild from eco mode without re-running Whisper, and direct-URL ffmpeg extraction/cutting) while keeping our fork's `custom_downloader`, race-safe retry serialization, and Windows subprocess flags.
+- **Modified / merged files**:
+  - `viralcut/reframe.py`, `viralcut/db.py`, `web/app.js`, `tests/test_reframe.py`, `tests/test_render.py`: clean upstream merge preserving `_haar_cascade()` caching.
+  - `viralcut/downloader.py`: added direct-URL early path (`_extract_direct_audio` / `_cut_direct_section` with `subprocess_kwargs()` and `meta_out` probing) ahead of `custom_downloader.download_section_smart()`.
+  - `viralcut/main.py`, `viralcut/jobs.py`, `viralcut/pipeline.py`: combined upstream's `force_hd` + `segments_mode` 1080p rebuild (`db.reset_clips_pending`) with race-safe `jobs.submit_retry(..., segments_hd=...)` and `meta_out` tracking.
+  - `README.md`, `CUSTOM_CHANGES.md`, `CUSTOM_CHANGES_ru.md`: updated base version to `1.4.3`.
+- **Verification**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (including `LongClipRenderTest` 36s reframed render).
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

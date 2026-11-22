@@ -93,8 +93,12 @@ def submit_project(pid: str) -> None:
     _guarded(pid, lambda: pipeline.run_project(pid))
 
 
-def submit_retry(pid: str, *, prepare_only: bool = False) -> None:
+def submit_retry(pid: str, *, prepare_only: bool = False, segments_hd: bool = False) -> None:
     def _run() -> None:
+        if segments_hd:
+            db.reset_clips_pending(pid)
+            pipeline.process_project(pid)
+            return
         db.clear_clips(pid)
         if prepare_only:
             pipeline.prepare_project(pid)
