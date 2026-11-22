@@ -144,6 +144,20 @@
   - Команда `gh repo view hiez1337/viralcut --json hasIssuesEnabled,hasDiscussionsEnabled` возвращает `true` для обоих параметров.
   - Проверка валидности перекрёстных ссылок между `README.md`, `CUSTOM_CHANGES.md` и `CUSTOM_CHANGES_ru.md`.
 
+## Синхронизация с upstream `v1.4.2` и автоматический CI форка (`custom-ci.yml`)
+- **Цель**: Объединить исправления рендера из оригинального релиза `vanwild11/viralcut` `v1.4.2` (пробная проверка аппаратного энкодера `_hw_works()` на 8 кадрах, пересборка команды `_compose()` / `_run_encode()` при откате на `libx264`, поле `"hw"` в `/api/health`, вывод причины ошибки клипа в `pipeline.py`, а также новые тесты `tests/test_render.py`) с модификациями форка и добавить автоматический CI-прогон всех тестов для PR в `custom`.
+- **Новые файлы**:
+  - `.github/workflows/custom-ci.yml`: запускает `python -m unittest discover -s tests -v` на `windows-latest` при каждом push и PR в ветку `custom`.
+- **Изменённые / объединённые файлы**:
+  - `viralcut/render.py`: принята архитектура upstream `_hw_works()`, `_video_args()`, `_run_encode()` и `_compose()` с минимальными хуками телеметрии `custom_debug` и закрытием потоков.
+  - `viralcut/main.py`: объединены поле upstream `"hw": render.hw_encoder()` в `/api/health` и все кастомные эндпоинты/поля форка (`"whisper_model"`).
+  - `viralcut/pipeline.py`: принят вывод причины первого упавшего клипа при `rendered == 0`.
+  - `tests/test_custom_features.py`: обновлены тесты `RenderFallbackTest` под `_run_encode()` и проверку очистки процессов `custom_debug`.
+  - `README.md`, `CUSTOM_CHANGES.md`, `CUSTOM_CHANGES_ru.md`: базовая версия обновлена до `1.4.2`, добавлены упоминания `custom-ci.yml` и `tests/test_render.py`.
+- **Проверка работоспособности**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (проходят все тесты, включая новые тесты рендера `tests/test_render.py`).
+  - Зелёный статус проверки `Fork CI (Tests)` в Pull Request в ветку `custom`.
+
 <!-- Шаблон для будущих изменений:
 ## [Название функции / исправления]
 - **Цель**: Зачем сделано изменение и ожидаемое поведение.

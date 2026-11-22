@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Base-1.4.1-8b5cf6?style=flat-square" alt="Base 1.4.1">
+  <img src="https://img.shields.io/badge/Base-1.4.2-8b5cf6?style=flat-square" alt="Base 1.4.2">
   <img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&style=flat-square" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/NVIDIA-CUDA%20%2F%20NVENC-76B900?logo=nvidia&logoColor=white&style=flat-square" alt="NVIDIA CUDA / NVENC">
@@ -47,7 +47,7 @@
   <a href="#оригинальный-проект-upstream-и-лицензия">Оригинальный проект</a>
 </p>
 
-> **О репозитории:** это персональный форк [`hiez1337/viralcut`](https://github.com/hiez1337/viralcut) поверх оригинального [`vanwild11/viralcut`](https://github.com/vanwild11/viralcut) (база `1.4.1`).
+> **О репозитории:** это персональный форк [`hiez1337/viralcut`](https://github.com/hiez1337/viralcut) поверх оригинального [`vanwild11/viralcut`](https://github.com/vanwild11/viralcut) (база `1.4.2`).
 > Форк адаптирован под Windows 10/11 с поддержкой GPU NVIDIA (CUDA + NVENC) и удобным выбором модели Whisper прямо в интерфейсе, но также работает на CPU и macOS/Linux.
 
 ---
@@ -270,10 +270,12 @@ web/                         веб-интерфейс без сборки (app.
 desktop/                     оболочка pywebview для Windows / macOS
 tests/
   test_analyze.py            базовые тесты анализатора и SRT
+  test_render.py             тесты рендера и отката аппаратного энкодера
   test_custom_features.py    [fork] тесты моделей Whisper, загрузчика, Инспектора, очистки, БД и рендера
 ViralCut-lite.spec           [fork] конфиг PyInstaller для лёгкого Windows-релиза без CUDA DLL
 build_windows_lite.ps1       [fork] локальная сборка + smoke-test + упаковка Lite-релиза
 .github/workflows/
+  custom-ci.yml              [fork] автопрогон всех тестов для push / PR в custom
   custom-release.yml         [fork] ручная сборка Lite-релиза в GitHub Actions
 release/fork-v1.4.1-1/       описание и контрольные суммы релиза fork-v1.4.1-1
 AGENTS.md                    правила ведения форка и синхронизации с upstream

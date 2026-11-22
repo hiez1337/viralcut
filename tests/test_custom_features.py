@@ -284,17 +284,17 @@ class RenderFallbackTest(unittest.TestCase):
             src.write_bytes(b"0" * 4096)
             calls = []
 
-            def fake_run_proc(cmd, duration, out_path, encoder_label, source_res, target_res, on_progress):
-                calls.append((encoder_label, list(cmd)))
+            def fake_run_encode(cmd, duration, on_progress, *, label="", encoder="", source_res="", target_res=""):
+                calls.append((encoder, list(cmd)))
                 if len(calls) == 1:
-                    return 1, ["nvenc init error"], False, ""
-                out_path.write_bytes(b"x" * 16384)
-                return 0, [], False, ""
+                    return 1, ["nvenc init error"], None
+                out.write_bytes(b"x" * 16384)
+                return 0, [], None
 
             with mock.patch.object(render, "probe", return_value={"duration": 5.0, "width": 1920, "height": 1080, "fps": 30.0, "has_audio": False}), \
                  mock.patch.object(render, "hw_encoder", return_value="h264_nvenc"), \
                  mock.patch.object(render, "ffmpeg", return_value="ffmpeg"), \
-                 mock.patch.object(render, "_run_render_proc", side_effect=fake_run_proc):
+                 mock.patch.object(render, "_run_encode", side_effect=fake_run_encode):
                 res = render.render_clip(src, 0.0, 5.0, out)
 
             self.assertEqual(res["path"], out)
@@ -303,22 +303,23 @@ class RenderFallbackTest(unittest.TestCase):
             self.assertIn("libx264", fallback_cmd)
             self.assertEqual(fallback_cmd[-6:], ["-r", "30", "-movflags", "+faststart", "-shortest", str(out)])
 
-    def test_run_render_proc_drains_large_stdout_without_deadlock(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            out = Path(tmp) / "clip.mp4"
-            script = "import sys; sys.stdout.write('x=1\\n'*500 + 'out_time_us=2500000\\n'); sys.stdout.flush()"
-            rc, tail, killed, _ = render._run_render_proc(
-                [sys.executable, "-c", script],
-                5.0,
-                out,
-                "libx264",
-                "1920x1080",
-                "1080x1920",
-                None,
-            )
-            self.assertEqual(rc, 0)
-            self.assertFalse(killed)
-            self.assertEqual(tail, [])
+    def test_run_encode_drains_large_stdout_and_unregisters_debug_process(self):
+        script = "import sys; sys.stdout.write('x=1\\n'*500 + 'out_time_us=2500000\\n'); sys.stdout.flush()"
+        seen = []
+        rc, tail, stop_reason = render._run_encode(
+            [sys.executable, "-c", script],
+            5.0,
+            seen.append,
+            label="clip.mp4",
+            encoder="libx264",
+            source_res="1920x1080",
+            target_res="1080x1920",
+        )
+        self.assertEqual(rc, 0)
+        self.assertIsNone(stop_reason)
+        self.assertEqual(tail, [])
+        self.assertTrue(any(abs(p - 0.5) < 0.01 for p in seen))
+        self.assertEqual(custom_debug.snapshot()["children"], [])
 
 
 class CustomFontsSyncTest(unittest.TestCase):
