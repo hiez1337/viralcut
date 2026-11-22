@@ -742,5 +742,108 @@ class CustomWhisperTest(unittest.TestCase):
         self.assertEqual(pipeline._whisper_lang({"language": "en"}), "en")
 
 
+class WhisperOptimizationSettingsTest(unittest.TestCase):
+    def setUp(self):
+        custom_whisper._RUNTIME_SETTINGS = None
+
+    def tearDown(self):
+        custom_whisper._RUNTIME_SETTINGS = None
+
+    def test_whisper_settings_defaults(self):
+        settings_data = custom_whisper.get_whisper_settings()
+        self.assertIn("settings", settings_data)
+        self.assertIn("presets", settings_data)
+        self.assertIn("hardware", settings_data)
+        self.assertIn("effective", settings_data)
+        s = settings_data["settings"]
+        self.assertEqual(s.get("preset"), "auto")
+        self.assertEqual(s.get("device"), "auto")
+        self.assertEqual(s.get("compute_type"), "auto")
+        self.assertEqual(s.get("beam_size"), 2)
+        self.assertEqual(s.get("batch_size"), 16)
+        self.assertEqual(s.get("recheck_limit"), 4)
+
+    def test_whisper_settings_presets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                # 1. Применение пресета ultra_fast_gpu
+                res = custom_whisper.set_whisper_settings({"preset": "ultra_fast_gpu"})
+                s = res["settings"]
+                self.assertEqual(s["preset"], "ultra_fast_gpu")
+                self.assertEqual(s["device"], "cuda")
+                self.assertEqual(s["compute_type"], "float16")
+                self.assertEqual(s["beam_size"], 1)
+                self.assertEqual(s["batch_size"], 32)
+                self.assertEqual(s["recheck_limit"], 0)
+
+                # 2. Применение пресета optimized_cpu
+                res = custom_whisper.set_whisper_settings({"preset": "optimized_cpu"})
+                s = res["settings"]
+                self.assertEqual(s["preset"], "optimized_cpu")
+                self.assertEqual(s["device"], "cpu")
+                self.assertEqual(s["compute_type"], "int8")
+                self.assertEqual(s["beam_size"], 2)
+                self.assertEqual(s["batch_size"], 16)
+                self.assertEqual(s["recheck_limit"], 4)
+
+                # 3. Возврат на auto
+                res = custom_whisper.set_whisper_settings({"preset": "auto"})
+                self.assertEqual(res["settings"]["preset"], "auto")
+
+    def test_whisper_settings_manual_overrides(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                res = custom_whisper.set_whisper_settings({
+                    "device": "cpu",
+                    "compute_type": "int8_float32",
+                    "cpu_threads": 6,
+                    "beam_size": 2,
+                    "batch_size": 12,
+                    "recheck_limit": 2,
+                })
+                s = res["settings"]
+                self.assertEqual(s["preset"], "custom")
+                self.assertEqual(s["device"], "cpu")
+                self.assertEqual(s["compute_type"], "int8_float32")
+                self.assertEqual(s["cpu_threads"], 6)
+                self.assertEqual(s["beam_size"], 2)
+                self.assertEqual(s["batch_size"], 12)
+                self.assertEqual(s["recheck_limit"], 2)
+
+                self.assertEqual(custom_whisper.get_effective_device(), "cpu")
+                self.assertEqual(custom_whisper.get_effective_compute_type("cpu"), "int8_float32")
+                self.assertEqual(custom_whisper.get_effective_cpu_threads(), 6)
+                self.assertEqual(custom_whisper.get_effective_beam_size(), 2)
+                self.assertEqual(custom_whisper.get_effective_batch_size(), 12)
+                self.assertEqual(custom_whisper.get_effective_recheck_limit(), 2)
+
+    def test_whisper_settings_api_routes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                # GET
+                data = main.whisper_settings()
+                self.assertIn("settings", data)
+                self.assertIn("effective", data)
+
+                # POST
+                req = main.WhisperSettingsIn(preset="balanced_gpu")
+                updated = main.whisper_set_settings(req)
+                self.assertEqual(updated["settings"]["preset"], "balanced_gpu")
+                self.assertEqual(updated["settings"]["beam_size"], 2)
+
+    def test_physical_cores_detection(self):
+        cores = custom_whisper.get_physical_cpu_cores()
+        self.assertIsInstance(cores, int)
+        self.assertGreaterEqual(cores, 1)
+
+    def test_candidates_respects_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                custom_whisper.set_whisper_settings({"device": "cpu", "compute_type": "int8"})
+                candidates = custom_whisper.whisper_candidates(long_audio=False)
+                # First candidate must be cpu / int8
+                self.assertEqual(candidates[0], ("cpu", "int8"))
+
+
 if __name__ == "__main__":
     unittest.main()

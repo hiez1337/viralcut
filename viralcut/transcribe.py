@@ -138,12 +138,26 @@ def _get_model(
         model = None
         for device, compute in candidates:
             try:
-                model = WhisperModel(
-                    model_ref,
-                    device=device,
-                    compute_type=compute,
-                    download_root=str(MODELS_DIR),
-                )
+                model_kwargs: Dict[str, Any] = {
+                    "download_root": str(MODELS_DIR),
+                }
+                if device == "cpu":
+                    model_kwargs["cpu_threads"] = custom_whisper.get_effective_cpu_threads()
+                try:
+                    model = WhisperModel(
+                        model_ref,
+                        device=device,
+                        compute_type=compute,
+                        **model_kwargs,
+                    )
+                except TypeError:
+                    model_kwargs.pop("cpu_threads", None)
+                    model = WhisperModel(
+                        model_ref,
+                        device=device,
+                        compute_type=compute,
+                        **model_kwargs,
+                    )
                 model._vc_device = device  # type: ignore[attr-defined]
                 custom_debug.record_whisper(
                     model=target_model, device=device, compute_type=compute, status="ready",
@@ -173,12 +187,15 @@ def _decode(model, audio: Path, language: Optional[str], vad: bool,
             prompt: Optional[str] = None, beam: Optional[int] = None,
             temperature=None, condition: bool = True):
     """Один проход декодирования с настройками под качество."""
+    from . import custom_whisper
+
+    beam_val = beam or custom_whisper.get_effective_beam_size(BEAM_SIZE)
     return model.transcribe(
         str(audio),
         language=language or None,
         task="transcribe",
-        beam_size=beam or BEAM_SIZE,
-        best_of=beam or BEAM_SIZE,
+        beam_size=beam_val,
+        best_of=beam_val,
         temperature=[0.0, 0.2, 0.4, 0.6] if temperature is None else temperature,
         length_penalty=1.0,
         repetition_penalty=1.05,
@@ -200,17 +217,20 @@ def _decode(model, audio: Path, language: Optional[str], vad: bool,
 def _decode_batched(model, audio: Path, language: Optional[str], vad: bool):
     """Пачечное декодирование (faster-whisper BatchedInferencePipeline)."""
     from faster_whisper import BatchedInferencePipeline
+    from . import custom_whisper
 
     pipe = BatchedInferencePipeline(model=model)
+    beam_val = custom_whisper.get_effective_beam_size(BEAM_SIZE)
+    batch_val = custom_whisper.get_effective_batch_size(BATCH_SIZE)
     kwargs = dict(
         language=language or None,
         task="transcribe",
-        beam_size=BEAM_SIZE,
+        beam_size=beam_val,
         condition_on_previous_text=True,
         initial_prompt=ASR_PROMPT,
         vad_filter=vad,
         word_timestamps=True,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_val,
     )
     try:
         return pipe.transcribe(str(audio), **kwargs)
@@ -492,11 +512,12 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
 
         # Второй проход по спорным местам — только когда аудио не разрезано на части.
         fixed = 0
-        if len(spans) == 1 and RECHECK_LIMIT > 0:
+        effective_recheck = custom_whisper.get_effective_recheck_limit(RECHECK_LIMIT)
+        if len(spans) == 1 and effective_recheck > 0:
             if on_progress:
                 on_progress(0.995, "Проверка спорных фрагментов…")
             try:
-                fixed = _recheck(model, wav, workdir, out, detected_language, on_progress, RECHECK_LIMIT)
+                fixed = _recheck(model, wav, workdir, out, detected_language, on_progress, effective_recheck)
             except Cancelled:
                 raise
             except Exception:  # noqa: BLE001

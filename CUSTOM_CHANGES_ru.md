@@ -196,6 +196,30 @@
 - **Проверка работоспособности**:
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (все 55 тестов успешно проходят).
 
+## Бенчмаркинг Whisper, аппаратные профили ускорения и модальное окно настроек
+- **Цель**: Полное профилирование и бенчмаркинг транскрипции Whisper на CPU (Ryzen 7 5700X3D) и GPU (GeForce RTX 4060 8GB) на реальном 12.6-минутном аудио (`https://youtu.be/f6ZJJwdrwcY`). Определение оптимальных параметров вычислений (+59%..+77% ускорение на CPU с `beam_size=2`, 12x–21x ускорение на GPU с пакетным декодированием FP16, распределение потоков по физическим ядрам процессора без забивки кэша гипертрейдингом). Добавление готовых пресетов ускорения и отдельной кнопки с тёмным стеклянным окном детальных настроек в левом нижнем углу интерфейса.
+- **Ключевые результаты бенчмарков**:
+  - **CPU (Ryzen 7 5700X3D)**: Базовый `small` — 72.79 с (10.4x RTF). 8 потоков (все физические ядра) сократили время до 59.37 с (+23%). `beam_size=2` снизил время до 45.81 с (+59% ускорение на Small) и с 208.13 с до 117.59 с (+77% ускорение на Medium, экономия 1.5 минут на 12.6-минутном видео) при идентичном качестве текста. Формат `int8` на 37% быстрее `float32` и требует в 2.5 раза меньше RAM.
+  - **GPU (RTX 4060 8GB)**: Базовый `small` — 6.11 с (123.8x RTF, в 11.9 раз быстрее CPU). Оптимизированный `small` — 5.29 с (143x RTF). `medium` выполняется за 9.90 с (76.3x RTF, в 21.0 раз быстрее базового CPU). Пакетное декодирование (batched) на GPU в 4.8 раз быстрее последовательного. Утечек VRAM/памяти при повторных прогонах не обнаружено.
+- **Новые файлы**:
+  - `web/custom_settings.css`: стили кнопки настроек в сайдбаре (`.side-settings-btn`), модального окна (`.settings-panel`), блока детекции железа (`.settings-hw-card`), сетки пресетов (`.settings-presets-grid`) и 2-колоночной сетки выпадающих списков.
+  - `web/custom_settings.js`: модуль `window.vcSettings`, управляющий модальным окном, отображением живых характеристик оборудования, переключением пресетов, ручной настройкой параметров и сохранением через `/api/whisper/settings`.
+  - `scratch/benchmark/BENCHMARK_REPORT.md` и `scratch/benchmark/GPU_BENCHMARK_REPORT.md`: подробные отчёты с матрицами измерений, графиками и аналитикой.
+- **Изменённые кастомные файлы**:
+  - `viralcut/custom_whisper.py`:
+    - Добавлены `DEFAULT_OPTIMIZATION_SETTINGS` и `OPTIMIZATION_PRESETS` (`auto`, `ultra_fast_gpu`, `balanced_gpu`, `quality_gpu`, `optimized_cpu`, `eco_cpu`).
+    - Добавлены функции `get_physical_cpu_cores()`, `get_system_hardware_info()`, `get_whisper_settings()`, `set_whisper_settings()`.
+    - Добавлены эффективные геттеры: `get_effective_device()`, `get_effective_compute_type()`, `get_effective_cpu_threads()`, `get_effective_beam_size()`, `get_effective_batch_size()`, `get_effective_recheck_limit()`.
+    - Обновлена функция `whisper_candidates()` для динамического применения настроек пользователя.
+  - `tests/test_custom_features.py`: добавлен тестовый класс `WhisperOptimizationSettingsTest` (проверка пресетов, ручных параметров, API эндпоинтов, расчёта ядер и маппинга кандидатов).
+- **Изменённые файлы оригинала (upstream)**:
+  - `viralcut/transcribe.py`: передача `cpu_threads=custom_whisper.get_effective_cpu_threads()` при работе на CPU, использование динамических `beam_size`, `batch_size` и `recheck_limit`.
+  - `viralcut/main.py`: добавлена Pydantic-схема `WhisperSettingsIn` и эндпоинты `GET /api/whisper/settings`, `POST /api/whisper/settings`.
+  - `web/index.html`: подключён `/static/custom_settings.css?v=1`, добавлена кнопка `#vcSettingsBtn` перед `.side-foot`, подключён скрипт `/static/custom_settings.js?v=1`.
+- **Проверка работоспособности**:
+  - `.\.venv-win\Scripts\python.exe -m unittest tests/test_custom_features.py` (все 36 тестов успешно проходят).
+  - `.\.venv-win\Scripts\python.exe -m unittest discover tests` (все 61 тест успешно проходят).
+
 <!-- Шаблон для будущих изменений:
 ## [Название функции / исправления]
 - **Цель**: Зачем сделано изменение и ожидаемое поведение.

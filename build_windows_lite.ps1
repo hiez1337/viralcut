@@ -1,8 +1,8 @@
 ﻿# Сборка лёгкого релиза ViralCut (Windows 10/11 x64) без CUDA DLL и вшитых моделей.
 # Запуск: powershell -ExecutionPolicy Bypass -File build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1
 param(
-    [string]$Tag = "fork-v1.4.3-2",
-    [string]$Version = "1.4.3-fork.2"
+    [string]$Tag = "fork-v1.4.3-3",
+    [string]$Version = "1.4.3-fork.3"
 )
 
 $ErrorActionPreference = "Stop"
@@ -105,7 +105,17 @@ try {
     if ($jsResp.StatusCode -ne 200) {
         throw "Smoke-test: /static/custom_whisper.js вернул код $($jsResp.StatusCode)"
     }
-    Write-Host "[ViralCut Lite] Smoke-test пройден (small по умолчанию, 3 модели, UI статика ОК)." -ForegroundColor Green
+
+    $setResp = Invoke-RestMethod -Uri "http://127.0.0.1:8799/api/whisper/settings" -TimeoutSec 3
+    if (-not $setResp.presets -or -not $setResp.effective) {
+        throw "Smoke-test: /api/whisper/settings не вернул presets или effective"
+    }
+
+    $setJs = Invoke-WebRequest -UseBasicParsing "http://127.0.0.1:8799/static/custom_settings.js" -TimeoutSec 3
+    if ($setJs.StatusCode -ne 200) {
+        throw "Smoke-test: /static/custom_settings.js вернул код $($setJs.StatusCode)"
+    }
+    Write-Host "[ViralCut Lite] Smoke-test пройден (small по умолчанию, 3 модели, пресеты оптимизации, UI статика ОК)." -ForegroundColor Green
 } finally {
     if ($proc -and -not $proc.HasExited) {
         Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue

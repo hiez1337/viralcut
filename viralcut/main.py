@@ -40,6 +40,16 @@ class WhisperLanguageIn(BaseModel):
     language: str
 
 
+class WhisperSettingsIn(BaseModel):
+    preset: Optional[str] = None
+    device: Optional[str] = None
+    compute_type: Optional[str] = None
+    cpu_threads: Optional[int] = None
+    beam_size: Optional[int] = None
+    batch_size: Optional[int] = None
+    recheck_limit: Optional[int] = None
+
+
 class RetryIn(BaseModel):
     force_hd: bool = False
     prepare_only: bool = False
@@ -205,6 +215,20 @@ def whisper_download_model(body: WhisperModelIn) -> Dict[str, Any]:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/whisper/settings")
+def whisper_settings() -> Dict[str, Any]:
+    return custom_whisper.get_whisper_settings()
+
+
+@app.post("/api/whisper/settings")
+def whisper_set_settings(body: WhisperSettingsIn) -> Dict[str, Any]:
+    try:
+        data = {k: v for k, v in body.model_dump().items() if v is not None}
+        return custom_whisper.set_whisper_settings(data)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @app.get("/api/debug")
