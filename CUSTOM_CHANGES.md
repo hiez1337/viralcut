@@ -196,6 +196,29 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
 - **Verification**:
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (55 tests passing).
 
+## Whisper Benchmarking, Hardware Optimization Presets & Sidebar Settings Modal
+- **Goal**: Full benchmarking of Whisper transcription across CPU (Ryzen 7 5700X3D) and GPU (GeForce RTX 4060 8GB) on realistic 12.6 min speech audio (`https://youtu.be/f6ZJJwdrwcY`). Identified optimal inference parameters (+59% to +77% CPU speedup with `beam_size=2`, 12x–21x speedup on GPU with FP16 batched inference, optimal physical CPU core thread allocation preventing SMT cache contention). Provided pre-configured optimization presets and a dedicated dark-glass settings modal triggered from the bottom-left sidebar.
+- **Key Benchmark Findings**:
+  - **CPU (Ryzen 7 5700X3D)**: Baseline `small` was 72.79s (10.4x RTF). Using 8 threads (all physical cores) reduced time to 59.37s (+23%). `beam_size=2` reduced time to 45.81s (+59% speedup on Small) and from 208.13s to 117.59s (+77% speedup on Medium, saving 1.5 minutes per 12.6 min video) with identical transcription quality. `int8` is 37% faster than `float32` and uses 2.5x less RAM.
+  - **GPU (RTX 4060 8GB)**: Baseline `small` is 6.11s (123.8x RTF, 11.9x faster than CPU). Optimized `small` is 5.29s (143x RTF). `medium` runs in 9.90s (76.3x RTF, 21.0x faster than CPU baseline). Batched inference is 4.8x faster than sequential on GPU. No memory leaks detected across repeated iterations.
+- **New files**:
+  - `web/custom_settings.css`: styling for the sidebar settings button (`.side-settings-btn`), modal panel (`.settings-panel`), hardware detection banner (`.settings-hw-card`), preset cards grid (`.settings-presets-grid`), and 2-column parameter dropdowns.
+  - `web/custom_settings.js`: `window.vcSettings` module handling modal lifecycle, live hardware inspection display, preset switching, parameter overrides, and `/api/whisper/settings` persistence.
+  - `scratch/benchmark/BENCHMARK_REPORT.md` & `scratch/benchmark/GPU_BENCHMARK_REPORT.md`: detailed reports with full matrices, charts, and analysis.
+- **Modified custom files**:
+  - `viralcut/custom_whisper.py`:
+    - Added `DEFAULT_OPTIMIZATION_SETTINGS` and `OPTIMIZATION_PRESETS` (`auto`, `ultra_fast_gpu`, `balanced_gpu`, `quality_gpu`, `optimized_cpu`, `eco_cpu`).
+    - Added `get_physical_cpu_cores()`, `get_system_hardware_info()`, `get_whisper_settings()`, `set_whisper_settings()`.
+    - Added effective value getters: `get_effective_device()`, `get_effective_compute_type()`, `get_effective_cpu_threads()`, `get_effective_beam_size()`, `get_effective_batch_size()`, `get_effective_recheck_limit()`.
+    - Updated `whisper_candidates()` to dynamically respect user device/compute selections.
+  - `tests/test_custom_features.py`: added `WhisperOptimizationSettingsTest` covering presets, manual parameter overrides, API endpoints, thread resolution, and candidates mapping.
+- **Modified upstream files**:
+  - `viralcut/transcribe.py`: passes `cpu_threads=custom_whisper.get_effective_cpu_threads()` when `device == "cpu"`, uses dynamic `beam_size`, `batch_size`, and `recheck_limit`.
+  - `viralcut/main.py`: added `WhisperSettingsIn` schema and routes `GET /api/whisper/settings`, `POST /api/whisper/settings`.
+  - `web/index.html`: linked `/static/custom_settings.css?v=1`, added `#vcSettingsBtn` before `.side-foot`, and loaded `/static/custom_settings.js?v=1`.
+- **Verification**:
+  - `.\.venv-win\Scripts\python.exe -m unittest tests/test_custom_features.py` (all 36 tests pass).
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

@@ -110,6 +110,112 @@ SUPPORTED_LANGUAGES = [
     {"id": "orig", "label": "Оригинал", "desc": "Оригинальная дорожка без автодубляжа"},
 ]
 VALID_LANGUAGE_IDS = {"auto", "ru", "en", "orig"}
+
+DEFAULT_OPTIMIZATION_SETTINGS: Dict[str, Any] = {
+    "preset": "auto",
+    "device": "auto",
+    "compute_type": "auto",
+    "cpu_threads": 0,
+    "beam_size": 2,
+    "batch_size": 16,
+    "recheck_limit": 4,
+}
+
+VALID_DEVICES = {"auto", "cuda", "cpu"}
+VALID_COMPUTE_TYPES = {"auto", "float16", "int8_float16", "int8", "int8_float32", "float32"}
+
+OPTIMIZATION_PRESETS: List[Dict[str, Any]] = [
+    {
+        "id": "auto",
+        "label": "🎯 Авто (Рекомендуемый)",
+        "desc": "Умный выбор под ваше железо: FP16 на GPU или INT8 на всех физических ядрах CPU",
+        "badge": "Авто",
+        "target": "auto",
+        "settings": {
+            "device": "auto",
+            "compute_type": "auto",
+            "cpu_threads": 0,
+            "beam_size": 2,
+            "batch_size": 16,
+            "recheck_limit": 4,
+        },
+    },
+    {
+        "id": "ultra_fast_gpu",
+        "label": "⚡ Ультра-скорость (GPU)",
+        "desc": "Максимальный FPS: float16, Beam 1 (жадный), Batch 32, без перепроверки (~5 сек на 12 мин)",
+        "badge": "Экстрим",
+        "target": "gpu",
+        "settings": {
+            "device": "cuda",
+            "compute_type": "float16",
+            "beam_size": 1,
+            "batch_size": 32,
+            "recheck_limit": 0,
+        },
+    },
+    {
+        "id": "balanced_gpu",
+        "label": "🎯 Баланс скорости и качества (GPU)",
+        "desc": "Идеально для NVIDIA RTX: float16, Beam 2, Batch 16, Recheck 4 (~9.9 сек на 12 мин)",
+        "badge": "Для RTX",
+        "target": "gpu",
+        "settings": {
+            "device": "cuda",
+            "compute_type": "float16",
+            "beam_size": 2,
+            "batch_size": 16,
+            "recheck_limit": 4,
+        },
+    },
+    {
+        "id": "quality_gpu",
+        "label": "🔬 Максимум точности (GPU)",
+        "desc": "Студийное качество: float16, Beam 5 (все 5 лучей), Batch 8, Recheck 8",
+        "badge": "Качество",
+        "target": "gpu",
+        "settings": {
+            "device": "cuda",
+            "compute_type": "float16",
+            "beam_size": 5,
+            "batch_size": 8,
+            "recheck_limit": 8,
+        },
+    },
+    {
+        "id": "optimized_cpu",
+        "label": "🚀 Оптимальный CPU (Многопоточный)",
+        "desc": "В 1.8× быстрее базового: int8, Beam 2, Batch 16, Recheck 4, все физические ядра",
+        "badge": "Для CPU",
+        "target": "cpu",
+        "settings": {
+            "device": "cpu",
+            "compute_type": "int8",
+            "cpu_threads": 0,
+            "beam_size": 2,
+            "batch_size": 16,
+            "recheck_limit": 4,
+        },
+    },
+    {
+        "id": "eco_cpu",
+        "label": "🔋 Энергосберегающий (CPU 4 ядра)",
+        "desc": "Минимум нагрузки: int8, Beam 1, Batch 8, 4 потока (для слабых процессоров)",
+        "badge": "Эко",
+        "target": "cpu",
+        "settings": {
+            "device": "cpu",
+            "compute_type": "int8",
+            "cpu_threads": 4,
+            "beam_size": 1,
+            "batch_size": 8,
+            "recheck_limit": 0,
+        },
+    },
+]
+
+_RUNTIME_SETTINGS: Optional[Dict[str, Any]] = None
+_CPU_HARDWARE_CACHE: Optional[Dict[str, Any]] = None
 _DOWNLOADS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -464,24 +570,307 @@ def cuda_diagnostics() -> Dict[str, Any]:
     }
 
 
+def get_physical_cpu_cores() -> int:
+    """Return estimated physical CPU cores (not logical threads) for optimal AVX2 GEMM."""
+    logical = os.cpu_count() or 4
+    if logical <= 2:
+        return logical
+    return max(1, logical // 2)
+
+
+def get_system_hardware_info() -> Dict[str, Any]:
+    """Inspect and cache host CPU/GPU hardware details."""
+    global _CPU_HARDWARE_CACHE
+    if _CPU_HARDWARE_CACHE is None:
+        logical = os.cpu_count() or 4
+        physical = get_physical_cpu_cores()
+        cpu_name = os.environ.get("PROCESSOR_IDENTIFIER", "CPU")
+        if sys.platform.startswith("win"):
+            try:
+                import winreg
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
+                cpu_name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
+                winreg.CloseKey(key)
+            except Exception:
+                pass
+        _CPU_HARDWARE_CACHE = {
+            "cpu_name": cpu_name.strip(),
+            "cpu_physical_cores": physical,
+            "cpu_logical_cores": logical,
+        }
+
+    hw = dict(_CPU_HARDWARE_CACHE)
+    register_cuda_dlls()
+    gpu_detected = _ct2_cuda_device_count() > 0
+    dlls_ok = _cuda_dlls_available() if gpu_detected else False
+    cuda_ready = gpu_detected and dlls_ok
+
+    gpu_name = "NVIDIA GPU"
+    vram_total_mb = 0.0
+    vram_free_mb = 0.0
+    if gpu_detected:
+        try:
+            import subprocess
+            cmd = ["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0 and res.stdout.strip():
+                parts = [p.strip() for p in res.stdout.strip().split(",")]
+                if parts:
+                    gpu_name = parts[0]
+                if len(parts) >= 3:
+                    vram_total_mb = float(parts[1])
+                    vram_free_mb = float(parts[2])
+        except Exception:
+            pass
+
+    hw.update({
+        "gpu_detected": gpu_detected,
+        "dlls_available": dlls_ok,
+        "cuda_ready": cuda_ready,
+        "gpu_name": gpu_name if gpu_detected else None,
+        "vram_total_mb": vram_total_mb,
+        "vram_free_mb": vram_free_mb,
+    })
+    return hw
+
+
+def _load_saved_settings() -> Dict[str, Any]:
+    path = _state_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("settings"), dict):
+            merged = dict(DEFAULT_OPTIMIZATION_SETTINGS)
+            merged.update(data["settings"])
+            return merged
+    except (OSError, ValueError):
+        pass
+    return dict(DEFAULT_OPTIMIZATION_SETTINGS)
+
+
+def get_whisper_settings() -> Dict[str, Any]:
+    """Return current Whisper optimization settings, presets, and detected hardware."""
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    settings = dict(_RUNTIME_SETTINGS)
+    eff_device = get_effective_device()
+    eff_compute = get_effective_compute_type(eff_device)
+    eff_threads = get_effective_cpu_threads()
+    eff_beam = get_effective_beam_size()
+    eff_batch = get_effective_batch_size()
+    eff_recheck = get_effective_recheck_limit()
+
+    badge = "Авто (GPU)" if eff_device == "cuda" else f"CPU · {eff_threads} ядер"
+    preset_name = settings.get("preset", "auto")
+    for p in OPTIMIZATION_PRESETS:
+        if p["id"] == preset_name:
+            badge = p["badge"]
+            break
+
+    return {
+        "settings": settings,
+        "presets": OPTIMIZATION_PRESETS,
+        "hardware": get_system_hardware_info(),
+        "effective": {
+            "device": eff_device,
+            "compute_type": eff_compute,
+            "cpu_threads": eff_threads,
+            "beam_size": eff_beam,
+            "batch_size": eff_batch,
+            "recheck_limit": eff_recheck,
+            "badge": badge,
+        },
+    }
+
+
+def set_whisper_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Persist and activate new Whisper optimization settings or preset."""
+    global _RUNTIME_SETTINGS
+    with _STATE_LOCK:
+        path = _state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cur = {}
+        if path.is_file():
+            try:
+                cur = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(cur, dict):
+                    cur = {}
+            except Exception:
+                cur = {}
+
+        current_settings = cur.get("settings")
+        if not isinstance(current_settings, dict):
+            current_settings = dict(DEFAULT_OPTIMIZATION_SETTINGS)
+
+        preset_id = str(new_settings.get("preset") or "").strip()
+        matched_preset = next((p for p in OPTIMIZATION_PRESETS if p["id"] == preset_id), None)
+
+        if matched_preset and "settings" in matched_preset:
+            current_settings = dict(matched_preset["settings"])
+            current_settings["preset"] = preset_id
+        elif preset_id == "auto":
+            current_settings = dict(DEFAULT_OPTIMIZATION_SETTINGS)
+            current_settings["preset"] = "auto"
+        else:
+            if "device" in new_settings and new_settings["device"] in VALID_DEVICES:
+                current_settings["device"] = new_settings["device"]
+            if "compute_type" in new_settings and new_settings["compute_type"] in VALID_COMPUTE_TYPES:
+                current_settings["compute_type"] = new_settings["compute_type"]
+            if "cpu_threads" in new_settings and isinstance(new_settings["cpu_threads"], int):
+                current_settings["cpu_threads"] = max(0, min(64, new_settings["cpu_threads"]))
+            if "beam_size" in new_settings and isinstance(new_settings["beam_size"], int):
+                current_settings["beam_size"] = max(1, min(10, new_settings["beam_size"]))
+            if "batch_size" in new_settings and isinstance(new_settings["batch_size"], int):
+                current_settings["batch_size"] = max(1, min(64, new_settings["batch_size"]))
+            if "recheck_limit" in new_settings and isinstance(new_settings["recheck_limit"], int):
+                current_settings["recheck_limit"] = max(0, min(32, new_settings["recheck_limit"]))
+            current_settings["preset"] = "custom"
+
+        cur["settings"] = current_settings
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        _RUNTIME_SETTINGS = dict(current_settings)
+
+    # Invalidate cached Whisper model if device or compute changed
+    try:
+        from . import transcribe
+        transcribe._reset_model()
+    except Exception:
+        pass
+
+    return get_whisper_settings()
+
+
+def get_effective_device() -> str:
+    """Resolve compute device: env override -> user setting -> auto (cuda if available else cpu)."""
+    env = os.environ.get("VIRALCUT_DEVICE")
+    if env and env.strip() and env.strip() != "auto":
+        return env.strip().lower()
+
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    choice = _RUNTIME_SETTINGS.get("device", "auto")
+    if choice in ("cuda", "cpu"):
+        return choice
+    return "cuda" if _has_cuda_gpu() else "cpu"
+
+
+def get_effective_compute_type(device: str) -> str:
+    """Resolve compute type: env override -> user setting -> optimal type."""
+    env = os.environ.get("VIRALCUT_COMPUTE")
+    if env and env.strip() and env.strip() != "auto":
+        return env.strip()
+
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    choice = _RUNTIME_SETTINGS.get("compute_type", "auto")
+    if choice != "auto":
+        return choice
+
+    if device == "cuda":
+        return "float16"
+    return "int8"
+
+
+def get_effective_cpu_threads() -> int:
+    """Return thread count for CPU inference (physical cores count by default)."""
+    env = os.environ.get("VIRALCUT_WHISPER_THREADS")
+    if env and env.strip():
+        try:
+            return max(1, int(env.strip()))
+        except ValueError:
+            pass
+
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    threads = int(_RUNTIME_SETTINGS.get("cpu_threads") or 0)
+    if threads > 0:
+        return threads
+    return get_physical_cpu_cores()
+
+
+def get_effective_beam_size(default_beam: int = 5) -> int:
+    env = os.environ.get("VIRALCUT_WHISPER_BEAM")
+    if env and env.strip():
+        try:
+            return max(1, int(env.strip()))
+        except ValueError:
+            pass
+
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    return int(_RUNTIME_SETTINGS.get("beam_size") or 2)
+
+
+def get_effective_batch_size(default_batch: int = 8) -> int:
+    env = os.environ.get("VIRALCUT_WHISPER_BATCH_SIZE")
+    if env and env.strip():
+        try:
+            return max(1, int(env.strip()))
+        except ValueError:
+            pass
+
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    return int(_RUNTIME_SETTINGS.get("batch_size") or 16)
+
+
+def get_effective_recheck_limit(default_limit: int = 8) -> int:
+    env = os.environ.get("VIRALCUT_WHISPER_RECHECK")
+    if env and env.strip():
+        try:
+            return max(0, int(env.strip()))
+        except ValueError:
+            pass
+
+    global _RUNTIME_SETTINGS
+    if _RUNTIME_SETTINGS is None:
+        _RUNTIME_SETTINGS = _load_saved_settings()
+
+    return int(_RUNTIME_SETTINGS.get("recheck_limit") or 4)
+
+
 def whisper_candidates(
-    long_audio: bool,
-    whisper_device: str,
-    whisper_compute: str,
+    long_audio: bool = False,
+    whisper_device: str = "auto",
+    whisper_compute: str = "auto",
 ) -> List[Tuple[str, str]]:
     """Select (device, compute_type) candidates, preferring CUDA when DLLs are present."""
     register_cuda_dlls()
+    eff_device = get_effective_device()
+    eff_compute = get_effective_compute_type(eff_device)
+
     if whisper_device != "auto":
-        return [(whisper_device, whisper_compute)]
+        eff_device = whisper_device
+    if whisper_compute != "auto" and whisper_compute != "int8":
+        eff_compute = whisper_compute
+
+    if eff_device == "cpu":
+        return [("cpu", eff_compute)]
+
+    if eff_device == "cuda":
+        return [("cuda", eff_compute), ("cuda", "int8_float16"), ("cpu", "int8")]
 
     if sys.platform == "darwin":
         if long_audio:
-            return [("cpu", whisper_compute)]
-        return [("mps", "float16"), ("cpu", whisper_compute)]
+            return [("cpu", eff_compute)]
+        return [("mps", "float16"), ("cpu", eff_compute)]
 
     if _has_cuda_gpu():
-        return [("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", whisper_compute)]
-    return [("cpu", whisper_compute)]
+        return [("cuda", eff_compute), ("cuda", "int8_float16"), ("cpu", "int8")]
+    return [("cpu", eff_compute)]
 
 
 def _notify_debug(model: str, status: str, fallback_reason: Optional[str] = None) -> None:
