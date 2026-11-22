@@ -85,9 +85,15 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     opts["max_height"] = mh if mh in (1080, 720, 480, 360) else 1080
     opts["segments"] = bool(opts.get("segments"))
     opts["force_hd"] = bool(opts.get("force_hd"))
-    opts["language"] = str(opts.get("language") or "auto")
-    if opts["language"] == "auto":
-        opts["language"] = ""
+    raw_lang = str(opts.get("language") or "auto").strip().lower()
+    if raw_lang in ("auto", "orig", "original"):
+        opts["language"] = raw_lang
+    elif raw_lang in ("ru", "rus", "russian"):
+        opts["language"] = "ru"
+    elif raw_lang in ("en", "eng", "english"):
+        opts["language"] = "en"
+    else:
+        opts["language"] = raw_lang or "auto"
     raw_wm = str(opts.get("whisper_model") or "").strip()
     if raw_wm:
         norm_wm = custom_whisper.normalize_model_name(raw_wm)
@@ -95,6 +101,11 @@ def normalize_options(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     else:
         opts["whisper_model"] = ""
     return opts
+
+
+def _whisper_lang(opts: Dict[str, Any]) -> Optional[str]:
+    raw = str(opts.get("language") or "").strip().lower()
+    return None if raw in ("auto", "orig", "original", "") else raw
 
 
 CANCELLED: set = set()
@@ -180,6 +191,7 @@ def _download_phase(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                     browser=opts.get("cookies_browser") or None,
                     force_hd=opts.get("force_hd", False),
                     max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
+                    language=opts.get("language"),
                 )
         except downloader.DownloadError as exc:
             raise RuntimeError(str(exc)) from exc
@@ -223,6 +235,7 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
     audio = downloader.download_audio(
         project["url"], workdir, browser=opts.get("cookies_browser") or None,
         progress=lambda p, st: progress(0.02 + p * 0.28, st),
+        language=opts.get("language"),
     )
     duration = float(audio.get("duration") or 0) or utils.media_duration(audio["path"])
     if duration < 5:
@@ -243,7 +256,7 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
     stop_hb, hb_thread = _heartbeat(pid, "Распознавание речи")
     try:
         transcript = transcribe.transcribe(
-            audio["path"], workdir, language=opts.get("language") or None,
+            audio["path"], workdir, language=_whisper_lang(opts),
             on_progress=lambda p, st: progress(asr_base + p * asr_span, f"{st} {int(p*100)}%"),
             model_name=w_model,
         )
@@ -282,6 +295,7 @@ def _prepare_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
             project["url"], workdir / "preview_src", sec_start, sec_end,
             progress=lambda p, st: progress(0.78 + p * 0.16, st),
             browser=opts.get("cookies_browser") or None, max_height=360,
+            language=opts.get("language"),
         )
         shutil.copy2(part, preview_path)
         shutil.rmtree(workdir / "preview_src", ignore_errors=True)
@@ -332,6 +346,7 @@ def _process_segments(pid: str, project: Dict[str, Any], opts: Dict[str, Any],
                 max_height=1080 if opts.get("force_hd") else int(opts.get("max_height", 1080)),
                 force_hd=bool(opts.get("force_hd", False)),
                 meta_out=sec_meta,
+                language=opts.get("language"),
             )
             if sec_meta.get("source_height"):
                 db.merge_meta(pid, {
@@ -470,7 +485,7 @@ def process_project(pid: str) -> None:
         stop_hb, hb_thread = _heartbeat(pid, "Распознавание речи")
         try:
             transcript = transcribe.transcribe(
-                source, workdir, language=opts.get("language") or None,
+                source, workdir, language=_whisper_lang(opts),
                 on_progress=lambda p, s: progress(asr_base + p * asr_span, f"{s} {int(p*100)}%"),
                 model_name=w_model,
             )

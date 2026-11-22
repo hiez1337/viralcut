@@ -13,8 +13,16 @@ from .config import ffmpeg, ffmpeg_bin_dir
 from .errors import Cancelled
 
 
-def pick_best_format(info: Dict[str, Any], max_height: int) -> Tuple[str, int]:
-    """Select the highest-resolution format up to max_height (height-first ranking)."""
+def pick_best_format(
+    info: Dict[str, Any],
+    max_height: int,
+    target_lang: Optional[str] = None,
+) -> Tuple[str, int]:
+    """Select the highest-resolution format up to max_height (height-first ranking).
+
+    Ranks audio tracks to prioritize explicit user language, original/default tracks,
+    and penalizes auto-dubbed foreign audio streams (e.g. YouTube's multi-track dubs).
+    """
     from . import downloader
 
     formats = [f for f in (info.get("formats") or []) if f.get("format_id")]
@@ -27,7 +35,7 @@ def pick_best_format(info: Dict[str, Any], max_height: int) -> Tuple[str, int]:
 
     fitting = [f for f in videos if int(f.get("height") or 0) <= max_height] or videos
 
-    def rank(f: Dict[str, Any]) -> tuple:
+    def rank_video(f: Dict[str, Any]) -> tuple:
         codec = f.get("vcodec") or ""
         proto = (f.get("protocol") or "").lower()
         return (
@@ -39,7 +47,7 @@ def pick_best_format(info: Dict[str, Any], max_height: int) -> Tuple[str, int]:
             float(f.get("tbr") or 0),
         )
 
-    video = max(fitting, key=rank)
+    video = max(fitting, key=rank_video)
     height = int(video.get("height") or 0)
     if (video.get("acodec") or "none") != "none":
         return str(video["format_id"]), height
@@ -49,14 +57,58 @@ def pick_best_format(info: Dict[str, Any], max_height: int) -> Tuple[str, int]:
         if (f.get("vcodec") or "none") == "none" and (f.get("acodec") or "none") != "none"
     ]
     if audios:
-        audio = max(
-            audios,
-            key=lambda f: (
-                1 if f.get("ext") == "m4a" else 0,
-                1 if (f.get("protocol") or "").lower() in ("https", "http") else 0,
-                float(f.get("abr") or f.get("tbr") or 0),
-            ),
-        )
+        def rank_audio(f: Dict[str, Any]) -> tuple:
+            lang = str(f.get("language") or "").lower().strip()
+            note = str(f.get("format_note") or "").lower()
+            fmt_str = str(f.get("format") or "").lower()
+            pref = f.get("language_preference")
+            try:
+                pref_val = int(pref) if pref is not None else 0
+            except (TypeError, ValueError):
+                pref_val = 0
+
+            proto = str(f.get("protocol") or "").lower()
+            abr = float(f.get("abr") or f.get("tbr") or 0)
+            is_m4a = 1 if f.get("ext") == "m4a" else 0
+            is_http = 1 if proto in ("https", "http") else 0
+
+            # 1. Запрошенный пользователем целевой язык
+            lang_match = 0
+            norm_target = (target_lang or "").lower().strip()
+            if norm_target and norm_target not in ("auto", "orig", "original"):
+                if lang == norm_target or lang.startswith(norm_target + "-") or lang.startswith(norm_target + "_"):
+                    lang_match = 2
+                elif norm_target == "ru" and ("russian" in note or "русский" in note):
+                    lang_match = 2
+                elif norm_target == "en" and ("english" in note or "английский" in note):
+                    lang_match = 2
+
+            # 2. Флаг оригинальной / дефолтной дорожки (yt-dlp ставит language_preference >= 0 или note "original")
+            is_original = 1 if (
+                pref_val > 0
+                or "original" in note
+                or "default" in note
+                or "original" in fmt_str
+                or "default" in fmt_str
+            ) else 0
+
+            # 3. Штраф дубляжам (yt-dlp ставит language_preference < 0 или dubbed / dubbed-auto)
+            is_dubbed = 1 if (
+                pref_val < 0
+                or "dubbed" in note
+                or "dubbed" in fmt_str
+            ) else 0
+
+            return (
+                lang_match,              # 2, если дорожка совпала с запрошенным языком
+                1 - is_dubbed,           # 1 для не-дубляжа (оригинал), 0 для дубляжа
+                is_original,             # 1 для явного оригинала / default
+                is_m4a,                  # prefer m4a container
+                is_http,                 # prefer direct https/http over hls
+                abr,                     # bitrate
+            )
+
+        audio = max(audios, key=rank_audio)
         return f"{video['format_id']}+{audio['format_id']}", height
     return str(video["format_id"]), height
 
@@ -71,6 +123,7 @@ def download_section_smart(
     browser: Optional[str] = None,
     max_height: int = 1080,
     force_hd: bool = False,
+    language: Optional[str] = None,
 ) -> Tuple[Path, Dict[str, Any]]:
     """Download only a clip range while preserving real HD client selection."""
     import os
@@ -109,7 +162,7 @@ def download_section_smart(
         picked = None
         try:
             info, args, client_label = downloader._youtube_info(url, browser, pot, progress)
-            picked = (pick_best_format(info, max_height), args, client_label)
+            picked = (pick_best_format(info, max_height, target_lang=language), args, client_label)
         except downloader.DownloadError as exc:
             print(f"[youtube] section metadata failed: {exc}", file=sys.stderr)
 
@@ -344,6 +397,7 @@ def rerender_section_clip(
             browser=opts.get("cookies_browser") or None,
             max_height=int(opts.get("max_height", 1080)),
             force_hd=bool(opts.get("force_hd", False)),
+            language=opts.get("language") or None,
         )
         actual = utils.media_duration(part)
         offset = max(0.0, clip_start - sec_start)

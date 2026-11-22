@@ -168,6 +168,34 @@
 - **Проверка работоспособности**:
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (включая новый 36-секундный тест рендера `LongClipRenderTest`).
 
+## Исправление выбора многодорожечного аудио YouTube (оригинал вместо дубляжа) и переключатель языка в UI
+- **Цель**: Устранить проблему, из-за которой видео с несколькими аудиодорожками на YouTube (автодубляж на арабском, английском, испанском и др.) транскрибировались Whisper на чужом языке (например, арабском или английском) вместо оригинального языка ролика. Добавить переключатель языка (`Авто`, `Русский (RU)`, `English (EN)`, `Оригинал`) прямо в карточку Whisper в интерфейсе с сохранением в `data/whisper.json` и автоматической передачей в пайплайн обработки.
+- **Причина проблемы**:
+  - Функция `custom_downloader.pick_best_format` ранжировала аудиодорожки только по кортежу `(m4a, https, abr)`. На видео с многоязычным автодубляжом более 20 дорожек имеют абсолютно одинаковый битрейт и кодек. Функция `max()` в Python всегда выбирала первый элемент массива (`140-0` арабский), так как YouTube сортирует дорожки по алфавиту названий языков.
+  - В `transcribe.py` параметр `language_detection_segments` равнялся `1` (30 секунд), из-за чего Whisper мог ошибочно зафиксировать чужой язык на вступительной музыке или шумах до начала речи.
+- **Изменённые кастомные файлы**:
+  - `viralcut/custom_downloader.py`:
+    - Переработано ранжирование аудио в `pick_best_format(info, max_height, target_lang=None)`: приоритет запрошенного языка (`lang_match: 2`), пенализация дублированных дорожек (`language_preference < 0` или `'dubbed' in format_note`), и наивысший приоритет оригинальной/дефолтной дорожки (`language_preference > 0` или ключевые слова `'original'/'default'`).
+    - Проброс параметра `language` в `download_section_smart()` и `rerender_section_clip()`.
+  - `viralcut/custom_whisper.py`:
+    - Добавлены константы `SUPPORTED_LANGUAGES = ["auto", "ru", "en", "orig"]`, функции `get_active_language()`, `set_active_language(lang)` с атомарным сохранением в `data/whisper.json`.
+    - Добавлены поля `active_language` и `languages` в `models_payload()`.
+  - `web/custom_whisper.js`, `web/custom_whisper.css`:
+    - Добавлены кнопки-таблетки переключения языка (`Авто`, `Русский (RU)`, `English (EN)`, `Оригинал`).
+    - Обработка клика с отправкой на `POST /api/whisper/language` и экспорт метода `getLanguage()` в `window.vcWhisper`.
+  - `tests/test_custom_features.py`:
+    - Добавлены тесты `test_prefers_original_audio_over_multi_track_auto_dubbed`, `test_whisper_language_setting_and_persistence`, `test_pipeline_whisper_lang_helper`.
+  - `.github/workflows/custom-release.yml`:
+    - Автоматизация сборки и релиза: права `contents: write`, входные параметры (`tag`, `version`, `publish_release`) и создание GitHub Release через `gh release create`.
+- **Изменённые файлы оригинала (upstream)**:
+  - `viralcut/downloader.py`: приём и передача `language` в `_pick_format()`, `download()`, `download_section()` и `download_audio()`.
+  - `viralcut/pipeline.py`: хелпер `_whisper_lang(opts)`, передача `language=opts.get("language")` в функции загрузчика и нормализованного кода языка в `transcribe.transcribe()`.
+  - `viralcut/transcribe.py`: увеличение `language_detection_segments` с `1` до `2` (контекст 60 секунд) и фильтрация ложных детекций на шуме (`ar`, `he`, `ur`, `cy`, `fa`, `hi` с уверенностью `< 0.65`).
+  - `viralcut/main.py`: схема `WhisperLanguageIn` и эндпоинт `POST /api/whisper/language`.
+  - `web/app.js`: заполнение поля `language` в `heroOptions()` из `window.vcWhisper.getLanguage()`.
+- **Проверка работоспособности**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (все 55 тестов успешно проходят).
+
 <!-- Шаблон для будущих изменений:
 ## [Название функции / исправления]
 - **Цель**: Зачем сделано изменение и ожидаемое поведение.

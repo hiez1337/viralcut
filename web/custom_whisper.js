@@ -130,6 +130,26 @@
     }
   }
 
+  async function selectLanguage(langId) {
+    if (!langId) return;
+    if (stateData && stateData.active_language === langId) return;
+    try {
+      const resp = await fetch("/api/whisper/language", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ language: langId }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      stateData = data;
+      render();
+    } catch (err) {
+      if (typeof window.toast === "function") {
+        window.toast(`Не удалось выбрать язык: ${err.message}`, "err");
+      }
+    }
+  }
+
   function render() {
     if (!isMounted()) return;
     if (!stateData) {
@@ -227,6 +247,29 @@
       ? `<div class="vc-wm-runtime-note">${esc(rt.reason)}</div>`
       : "";
 
+    const activeLang = (stateData && stateData.active_language) || "auto";
+    const langs = (stateData && stateData.languages) || [
+      { id: "auto", label: "Авто", desc: "Умное определение языка речи" },
+      { id: "ru", label: "Русский (RU)", desc: "Русская дорожка и субтитры" },
+      { id: "en", label: "English (EN)", desc: "Английская дорожка и субтитры" },
+      { id: "orig", label: "Оригинал", desc: "Оригинальная дорожка без автодубляжа" },
+    ];
+    const langBtnsHtml = langs
+      .map(
+        (l) => `
+        <button type="button" class="vc-wl-btn ${l.id === activeLang ? "active" : ""}" data-lang="${esc(l.id)}" title="${esc(l.desc || l.label)}">
+          ${esc(l.label)}
+        </button>`
+      )
+      .join("");
+
+    const langSectionHtml = `
+      <div class="vc-wl-wrap">
+        <span class="vc-wl-label">Язык дорожки и субтитров:</span>
+        <div class="vc-wl-group">${langBtnsHtml}</div>
+      </div>
+    `;
+
     slotEl.innerHTML = `
       <div class="vc-wm-wrap">
         <div class="vc-wm-head">
@@ -240,6 +283,7 @@
           <span class="vc-wm-dev-chip ${chipCls}" title="${esc(rt.reason || chipText)}">${esc(chipText)}</span>
         </div>
         <div class="vc-wm-grid">${cardsHtml}</div>
+        ${langSectionHtml}
         ${dlBoxHtml}
         ${hintHtml ? `<div class="vc-wm-hint">${hintHtml}</div>` : ""}
         ${runtimeNoteHtml}
@@ -257,13 +301,19 @@
         if (!dlBtn.disabled) downloadModel(dlBtn.dataset.dl);
         return;
       }
+      const langBtn = ev.target.closest("[data-lang]");
+      if (langBtn) {
+        ev.stopPropagation();
+        selectLanguage(langBtn.dataset.lang);
+        return;
+      }
       const card = ev.target.closest(".vc-wm-card[data-model]");
       if (card) selectModel(card.dataset.model);
     });
 
     el.addEventListener("keydown", (ev) => {
       if (ev.key !== "Enter" && ev.key !== " ") return;
-      if (ev.target.closest("[data-dl]")) return;
+      if (ev.target.closest("[data-dl]") || ev.target.closest("[data-lang]")) return;
       const card = ev.target.closest(".vc-wm-card[data-model]");
       if (!card) return;
       ev.preventDefault();
@@ -295,9 +345,14 @@
     return stateData && stateData.active ? stateData.active : undefined;
   }
 
+  function getLanguage() {
+    return (stateData && stateData.active_language) || "auto";
+  }
+
   window.vcWhisper = {
     mount,
     refresh: fetchModels,
     getSelected,
+    getLanguage,
   };
 })();

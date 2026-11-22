@@ -102,6 +102,33 @@ class PickBestFormatTest(unittest.TestCase):
         self.assertEqual(custom_downloader.pick_best_format(info, 720), ("136+140", 720))
         self.assertEqual(custom_downloader.pick_best_format(info, 360), ("18", 360))
 
+    def test_prefers_original_audio_over_multi_track_auto_dubbed(self):
+        info = {
+            "formats": [
+                {"format_id": "299", "height": 1080, "ext": "mp4", "vcodec": "avc1.64002A", "acodec": "none", "protocol": "https", "tbr": 5000},
+                # 140-0: арабский автодубляж (алфавитно идёт первым в ответе YouTube)
+                {"format_id": "140-0", "height": None, "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "protocol": "https", "abr": 129, "language": "ar", "format_note": "Arabic, medium", "language_preference": -1},
+                # 140-5: хинди дубляж
+                {"format_id": "140-5", "height": None, "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "protocol": "https", "abr": 129, "language": "hi", "format_note": "Hindi, medium", "language_preference": -1},
+                # 140-16: русский дубляж
+                {"format_id": "140-16", "height": None, "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "protocol": "https", "abr": 129, "language": "ru", "format_note": "Russian, medium", "language_preference": -1},
+                # 140-20: оригинальная дефолтная дорожка видео (английская)
+                {"format_id": "140-20", "height": None, "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "protocol": "https", "abr": 129, "language": "en-US", "format_note": "English (US) original (default), medium", "language_preference": 10},
+            ]
+        }
+        # 1. По умолчанию (авто / оригинал): должен выбрать 140-20 (оригинал), а НЕ 140-0 (арабский)!
+        fmt_auto, h_auto = custom_downloader.pick_best_format(info, 1080)
+        self.assertEqual(fmt_auto, "299+140-20")
+        self.assertEqual(h_auto, 1080)
+
+        # 2. Если пользователь явно запросил русский язык ("ru"):
+        fmt_ru, _ = custom_downloader.pick_best_format(info, 1080, target_lang="ru")
+        self.assertEqual(fmt_ru, "299+140-16")
+
+        # 3. Если пользователь запросил английский ("en"):
+        fmt_en, _ = custom_downloader.pick_best_format(info, 1080, target_lang="en")
+        self.assertEqual(fmt_en, "299+140-20")
+
 
 class DownloadSectionSmartTest(unittest.TestCase):
     def test_uses_youtube_info_default_client_and_records_meta(self):
@@ -518,11 +545,13 @@ class CustomCleanupTest(unittest.TestCase):
 class CustomWhisperTest(unittest.TestCase):
     def setUp(self):
         self._orig_runtime = custom_whisper._RUNTIME_MODEL
+        self._orig_runtime_lang = custom_whisper._RUNTIME_LANGUAGE
         self._orig_cfg_model = config.WHISPER_MODEL
         self._orig_downloads = dict(custom_whisper._DOWNLOADS)
 
     def tearDown(self):
         custom_whisper._RUNTIME_MODEL = self._orig_runtime
+        custom_whisper._RUNTIME_LANGUAGE = self._orig_runtime_lang
         config.WHISPER_MODEL = self._orig_cfg_model
         with custom_whisper._DL_LOCK:
             custom_whisper._DOWNLOADS.clear()
@@ -676,6 +705,41 @@ class CustomWhisperTest(unittest.TestCase):
         self.assertEqual(pipeline.normalize_options({"whisper_model": "large"})["whisper_model"], "large-v3")
         self.assertEqual(pipeline.normalize_options({"whisper_model": "medium"})["whisper_model"], "medium")
         self.assertEqual(pipeline.normalize_options({"whisper_model": "bogus"})["whisper_model"], "")
+
+    def test_whisper_language_setting_and_persistence(self):
+        self.assertEqual(custom_whisper.get_active_language(), "auto")
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                # 1. Переключение на ru
+                res = custom_whisper.set_active_language("ru")
+                self.assertEqual(custom_whisper.get_active_language(), "ru")
+                self.assertEqual(res["active_language"], "ru")
+                self.assertTrue(any(l["id"] == "ru" for l in res["languages"]))
+
+                # 2. Проверка сохранения в whisper.json
+                data = custom_whisper.models_payload()
+                self.assertEqual(data["active_language"], "ru")
+
+                # 3. Эндпоинт POST /api/whisper/language
+                api_res = main.whisper_set_language(main.WhisperLanguageIn(language="en"))
+                self.assertEqual(api_res["active_language"], "en")
+                self.assertEqual(custom_whisper.get_active_language(), "en")
+
+                # 4. Невалидный язык вызывает 400 в API и ValueError в ядре
+                with self.assertRaises(HTTPException) as ctx:
+                    main.whisper_set_language(main.WhisperLanguageIn(language="unknown_xyz"))
+                self.assertEqual(ctx.exception.status_code, 400)
+
+                # 5. Возврат на auto
+                custom_whisper.set_active_language("auto")
+                self.assertEqual(custom_whisper.get_active_language(), "auto")
+
+    def test_pipeline_whisper_lang_helper(self):
+        self.assertIsNone(pipeline._whisper_lang({"language": "auto"}))
+        self.assertIsNone(pipeline._whisper_lang({"language": "orig"}))
+        self.assertIsNone(pipeline._whisper_lang({"language": ""}))
+        self.assertEqual(pipeline._whisper_lang({"language": "ru"}), "ru")
+        self.assertEqual(pipeline._whisper_lang({"language": "en"}), "en")
 
 
 if __name__ == "__main__":

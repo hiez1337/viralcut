@@ -543,7 +543,7 @@ function heroOptions() {
     sub_offset: state.opts.subOffset,
     sub_speed: state.opts.subSpeed,
     cookies_browser: state.opts.cookies,
-    language: "auto",
+    language: window.vcWhisper && window.vcWhisper.getLanguage ? window.vcWhisper.getLanguage() : "auto",
     whisper_model: window.vcWhisper ? window.vcWhisper.getSelected() : undefined
   };
 }
