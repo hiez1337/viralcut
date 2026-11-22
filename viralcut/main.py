@@ -36,6 +36,10 @@ class WhisperModelIn(BaseModel):
     model: str
 
 
+class WhisperLanguageIn(BaseModel):
+    language: str
+
+
 class RetryIn(BaseModel):
     force_hd: bool = False
     prepare_only: bool = False
@@ -181,6 +185,14 @@ def whisper_models() -> Dict[str, Any]:
 def whisper_set_model(body: WhisperModelIn) -> Dict[str, Any]:
     try:
         return custom_whisper.set_active_model(body.model)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@app.post("/api/whisper/language")
+def whisper_set_language(body: WhisperLanguageIn) -> Dict[str, Any]:
+    try:
+        return custom_whisper.set_active_language(body.language)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
 

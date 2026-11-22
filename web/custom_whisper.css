@@ -264,6 +264,56 @@
   border: 1px solid rgba(255, 214, 10, 0.25);
 }
 
+/* Language selector row */
+.vc-wl-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--grouped-2);
+  border: 1px solid var(--separator);
+}
+
+.vc-wl-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.vc-wl-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.vc-wl-btn {
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--separator);
+  cursor: pointer;
+  transition: all 0.15s var(--ease);
+}
+
+.vc-wl-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.vc-wl-btn.active {
+  color: #c4b5fd;
+  background: rgba(139, 92, 246, 0.22);
+  border-color: rgba(167, 139, 250, 0.45);
+  box-shadow: 0 0 10px rgba(139, 92, 246, 0.25);
+}
+
 @media (max-width: 780px) {
   .vc-wm-grid {
     grid-template-columns: 1fr;

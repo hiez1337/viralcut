@@ -3,13 +3,21 @@ name: Build Fork Lite (Windows)
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: "Версия для имени архива (например, 1.4.1-fork.1)"
+      tag:
+        description: "Тег релиза (например, fork-v1.4.3-2)"
         required: false
         default: ""
+      version:
+        description: "Версия для имени архива (например, 1.4.3-fork.2)"
+        required: false
+        default: ""
+      publish_release:
+        description: "Опубликовать релиз на GitHub (true/false)"
+        required: false
+        default: "true"
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   windows-lite:
@@ -79,11 +87,30 @@ jobs:
           $zip = "ViralCut-${{ steps.version.outputs.value }}-windows-x64-lite.zip"
           Compress-Archive -Path dist\ViralCut -DestinationPath $zip -CompressionLevel Optimal
           $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  $zip" | Out-File -Encoding ascii SHA256SUMS.txt
           "$hash  $zip" | Out-File -Encoding ascii SHA256SUMS-windows-lite.txt
+
+      - name: Publish GitHub Release
+        if: ${{ github.event.inputs.publish_release != 'false' && github.event.inputs.tag != '' }}
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "${{ github.event.inputs.tag }}".Trim()
+          $zip = "ViralCut-${{ steps.version.outputs.value }}-windows-x64-lite.zip"
+          $notesFile = "release\$tag\RELEASE_NOTES.md"
+          $notesArgs = @()
+          if (Test-Path $notesFile) {
+            $notesArgs = @("--notes-file", $notesFile)
+          } else {
+            $notesArgs = @("--notes", "ViralCut ${{ steps.version.outputs.value }} Windows x64 Lite release")
+          }
+          gh release create $tag $zip SHA256SUMS.txt --target custom --latest --title "ViralCut ${{ steps.version.outputs.value }} — Windows x64 без CUDA DLL" @notesArgs
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-lite-zip
           path: |
             ViralCut-*-windows-x64-lite.zip
+            SHA256SUMS.txt
             SHA256SUMS-windows-lite.txt

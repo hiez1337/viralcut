@@ -101,6 +101,15 @@ _CUDA_REGISTERED = False
 _CUDA_DLLS_OK: Optional[bool] = None
 
 _RUNTIME_MODEL: Optional[str] = None
+_RUNTIME_LANGUAGE: Optional[str] = None
+DEFAULT_WHISPER_LANGUAGE = "auto"
+SUPPORTED_LANGUAGES = [
+    {"id": "auto", "label": "Авто", "desc": "Умное определение языка речи"},
+    {"id": "ru", "label": "Русский (RU)", "desc": "Русская дорожка и субтитры"},
+    {"id": "en", "label": "English (EN)", "desc": "Английская дорожка и субтитры"},
+    {"id": "orig", "label": "Оригинал", "desc": "Оригинальная дорожка без автодубляжа"},
+]
+VALID_LANGUAGE_IDS = {"auto", "ru", "en", "orig"}
 _DOWNLOADS: Dict[str, Dict[str, Any]] = {}
 
 
@@ -175,12 +184,68 @@ def _load_saved_model() -> Optional[str]:
     return None
 
 
+def _load_saved_language() -> Optional[str]:
+    path = _state_file()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            val = str(data.get("language") or "").strip().lower()
+            if val in VALID_LANGUAGE_IDS:
+                return val
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def _save_model_choice(model_name: str) -> None:
     path = _state_file()
     path.parent.mkdir(parents=True, exist_ok=True)
+    cur = {}
+    if path.is_file():
+        try:
+            cur = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(cur, dict):
+                cur = {}
+        except Exception:
+            cur = {}
+    cur["model"] = model_name
     tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps({"model": model_name}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def get_active_language() -> str:
+    """Return active language mode: auto, ru, en, orig."""
+    global _RUNTIME_LANGUAGE
+    if _RUNTIME_LANGUAGE:
+        return _RUNTIME_LANGUAGE
+    saved = _load_saved_language()
+    return saved or DEFAULT_WHISPER_LANGUAGE
+
+
+def set_active_language(language: str) -> Dict[str, Any]:
+    """Validate, persist, and activate one of the supported language modes."""
+    global _RUNTIME_LANGUAGE
+    raw = str(language or "").strip().lower()
+    if raw not in VALID_LANGUAGE_IDS:
+        raise ValueError(f"Язык '{language}' не поддерживается. Доступны: auto, ru, en, orig.")
+    with _STATE_LOCK:
+        path = _state_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        cur = {}
+        if path.is_file():
+            try:
+                cur = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(cur, dict):
+                    cur = {}
+            except Exception:
+                cur = {}
+        cur["language"] = raw
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
+        _RUNTIME_LANGUAGE = raw
+    return models_payload()
 
 
 def resolve_whisper_model() -> str:
@@ -863,6 +928,8 @@ def models_payload() -> Dict[str, Any]:
     return {
         "active": active,
         "default": DEFAULT_WHISPER_MODEL,
+        "active_language": get_active_language(),
+        "languages": SUPPORTED_LANGUAGES,
         "downloading_model": downloading_model,
         "runtime": cuda_diagnostics(),
         "models": items,

@@ -168,6 +168,34 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
 - **Verification**:
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (including `LongClipRenderTest` 36s reframed render).
 
+## Multi-Track Audio Language Selection & UI Whisper Language Selector
+- **Goal**: Fix an issue where YouTube videos with multiple audio tracks (e.g., auto-dubbing in Arabic, English, Spanish, Russian) caused Whisper to transcribe in a foreign language (such as Arabic or English) regardless of the original video language. Also provide a UI language selector (`Авто`, `Русский (RU)`, `English (EN)`, `Оригинал`) directly inside the Whisper card with persistent state and automatic pipeline propagation.
+- **Root cause**:
+  - `custom_downloader.pick_best_format` previously ranked audio streams solely by `(m4a, https, abr)`. On YouTube videos with multi-language auto-dubbing, up to 20+ tracks have identical bitrates and codecs. Python's `max()` picked the first element in the array (`140-0` Arabic) because YouTube lists languages alphabetically.
+  - In `transcribe.py`, `language_detection_segments` was set to `1` (30 seconds), which could lock onto false language detections caused by music intros or non-speech sounds before real speech begins.
+- **Modified custom files**:
+  - `viralcut/custom_downloader.py`:
+    - Updated `pick_best_format(info, max_height, target_lang=None)` audio ranking: prioritizes requested target language (`lang_match: 2`), penalizes dubbed streams (`language_preference < 0` or `'dubbed' in format_note`), and prioritizes original/default streams (`language_preference > 0` or `'original'/'default' in format_note`).
+    - Added `language` argument propagation to `download_section_smart()` and `rerender_section_clip()`.
+  - `viralcut/custom_whisper.py`:
+    - Added `SUPPORTED_LANGUAGES = ["auto", "ru", "en", "orig"]`, `get_active_language()`, `set_active_language(lang)` persisted into `data/whisper.json`.
+    - Added `active_language` and `languages` to `models_payload()`.
+  - `web/custom_whisper.js`, `web/custom_whisper.css`:
+    - Added glass button pills for language selection (`Авто`, `Русский (RU)`, `English (EN)`, `Оригинал`).
+    - Handled button click events with `POST /api/whisper/language` and exported `getLanguage()` on `window.vcWhisper`.
+  - `tests/test_custom_features.py`:
+    - Added `test_prefers_original_audio_over_multi_track_auto_dubbed`, `test_whisper_language_setting_and_persistence`, `test_pipeline_whisper_lang_helper`.
+  - `.github/workflows/custom-release.yml`:
+    - Added release automation: write permissions, dispatch inputs (`tag`, `version`, `publish_release`), and automated release creation with `gh release create`.
+- **Modified upstream files**:
+  - `viralcut/downloader.py`: accepted and propagated `language` in `_pick_format()`, `download()`, `download_section()`, and `download_audio()`.
+  - `viralcut/pipeline.py`: added `_whisper_lang(opts)` helper, passed `language=opts.get("language")` to downloader functions, and passed normalized language code to `transcribe.transcribe()`.
+  - `viralcut/transcribe.py`: increased `language_detection_segments` from `1` to `2` (60s context), and added guardrails against low-confidence false noise detections (`ar`, `he`, `ur`, `cy`, `fa`, `hi` with prob `< 0.65`).
+  - `viralcut/main.py`: added `WhisperLanguageIn` schema and `POST /api/whisper/language` endpoint.
+  - `web/app.js`: populated `language` in `heroOptions()` from `window.vcWhisper.getLanguage()`.
+- **Verification**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (55 tests passing).
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

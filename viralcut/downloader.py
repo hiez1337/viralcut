@@ -353,14 +353,14 @@ def _youtube_info(url: str, browser: Optional[str], pot: bool,
     raise DownloadError("YouTube не отдал видео ни одному клиенту. " + detail[-350:])
 
 
-def _pick_format(info: Dict[str, Any], max_height: int) -> tuple[str, int]:
+def _pick_format(info: Dict[str, Any], max_height: int, language: Optional[str] = None) -> tuple[str, int]:
     """Формат из фактически доступных — вместо «слепой» строки селектора."""
-    return custom_downloader.pick_best_format(info, max_height)
+    return custom_downloader.pick_best_format(info, max_height, target_lang=language)
 
 
 def download(url: str, dest_dir: Path, progress: ProgressCb = None,
              browser: Optional[str] = None, max_height: int = 1080,
-             force_hd: bool = False) -> Dict[str, Any]:
+             force_hd: bool = False, language: Optional[str] = None) -> Dict[str, Any]:
     """Скачивает видео. По умолчанию цель — 1080p, при блокировке видимый откат к SD."""
     dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -392,7 +392,7 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
         picked = None
         try:
             info, args, client_label = _youtube_info(url, browser, pot, progress)
-            picked = (_pick_format(info, max_height), args, client_label)
+            picked = (_pick_format(info, max_height, language=language), args, client_label)
         except DownloadError as exc:
             print(f"[youtube] метаданные не получены: {exc}", file=sys.stderr)
         if picked is not None:
@@ -699,7 +699,7 @@ def _extract_direct_audio(url: str, dest_dir: Path, progress: ProgressCb = None)
 
 
 def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
-                   browser: Optional[str] = None) -> Dict[str, Any]:
+                   browser: Optional[str] = None, language: Optional[str] = None) -> Dict[str, Any]:
     """Скачивает только звук — в разы меньше полного видео."""
     import yt_dlp
 
@@ -709,6 +709,13 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
         return _extract_direct_audio(url, dest_dir, progress)
     outtmpl = str(dest_dir / "audio.%(ext)s")
     timings = {"started": None, "finished": None, "bytes": 0, "slow_since": None}
+
+    target_format = AUDIO_FORMAT
+    norm_lang = (language or "").lower().strip()
+    if norm_lang and norm_lang not in ("auto", "orig", "original"):
+        target_format = f"ba[language^={norm_lang}]/ba[language_preference>0]/{AUDIO_FORMAT}"
+    else:
+        target_format = f"ba[language_preference>0]/{AUDIO_FORMAT}"
 
     def hook(d: Dict[str, Any]) -> None:
         if d.get("status") == "downloading":
@@ -733,7 +740,7 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
                 sp = f"{mb:.2f} МБ/с" if speed else "…"
                 progress(min(pct, 99) / 100.0, f"Скачивание аудио {pct:.0f}% · {sp}")
             custom_debug.record_download(
-                active=True, kind="audio", client="audio", format_id=AUDIO_FORMAT,
+                active=True, kind="audio", client="audio", format_id=target_format,
                 speed_mbps=(speed / 1048576.0) if speed else None,
                 pct=min(pct, 99.0), eta_s=d.get("eta"),
             )
@@ -745,7 +752,7 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
 
     opts: Dict[str, Any] = {
         "outtmpl": outtmpl,
-        "format": AUDIO_FORMAT,
+        "format": target_format,
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
@@ -824,7 +831,8 @@ def _cut_direct_section(url: str, dest_dir: Path, start: float, end: float,
 def download_section(url: str, dest_dir: Path, start: float, end: float,
                      progress: ProgressCb = None, browser: Optional[str] = None,
                      max_height: int = 1080, force_hd: bool = False,
-                     meta_out: Optional[Dict[str, Any]] = None) -> Path:
+                     meta_out: Optional[Dict[str, Any]] = None,
+                     language: Optional[str] = None) -> Path:
     """Скачивает только фрагмент видео (для экономного режима)."""
     if is_direct_media(url):
         ensure_path()
@@ -850,6 +858,7 @@ def download_section(url: str, dest_dir: Path, start: float, end: float,
         url, dest_dir, start, end,
         progress=progress, browser=browser,
         max_height=max_height, force_hd=force_hd,
+        language=language,
     )
     if meta_out is not None:
         meta_out.update(meta)

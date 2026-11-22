@@ -193,7 +193,7 @@ def _decode(model, audio: Path, language: Optional[str], vad: bool,
         log_prob_threshold=-1.0,
         compression_ratio_threshold=2.4,
         language_detection_threshold=0.5,
-        language_detection_segments=1,
+        language_detection_segments=2,
     )
 
 
@@ -468,9 +468,16 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                     continue
                 part, tinfo = result
                 out.extend(part)
-                if not detected_language and getattr(tinfo, "language", None):
-                    detected_language = tinfo.language
-                    language_probability = round(float(getattr(tinfo, "language_probability", 0.0) or 0.0), 3)
+                t_lang = getattr(tinfo, "language", None)
+                t_prob = round(float(getattr(tinfo, "language_probability", 0.0) or 0.0), 3)
+                if not detected_language and t_lang:
+                    # Защита от ложного срабатывания на шуме (арабский/иврит/урду/валлийский) при низкой уверенности
+                    is_suspicious_noise = t_lang in ("ar", "he", "ur", "cy", "fa", "hi") and t_prob < 0.65
+                    if not is_suspicious_noise or len(spans) == 1:
+                        detected_language = t_lang
+                        language_probability = t_prob
+                    else:
+                        print(f"[whisper] подозрительный язык {t_lang} ({t_prob:.2f}) на первом фрагменте пропущен", file=sys.stderr)
             except Cancelled:
                 raise
             except Exception:  # noqa: BLE001
