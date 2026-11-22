@@ -1,8 +1,8 @@
 ﻿# Сборка лёгкого релиза ViralCut (Windows 10/11 x64) без CUDA DLL и вшитых моделей.
 # Запуск: powershell -ExecutionPolicy Bypass -File build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1
 param(
-    [string]$Tag = "fork-v1.4.1-1",
-    [string]$Version = "1.4.1-fork.1"
+    [string]$Tag = "fork-v1.4.3-2",
+    [string]$Version = "1.4.3-fork.2"
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,6 +91,9 @@ try {
     $models = Invoke-RestMethod -Uri "http://127.0.0.1:8799/api/whisper/models" -TimeoutSec 3
     if ($models.active -ne "small" -or $models.models.Count -ne 3) {
         throw "Smoke-test: /api/whisper/models вернул некорректный каталог"
+    }
+    if (-not $models.active_language -or -not $models.languages) {
+        throw "Smoke-test: /api/whisper/models не вернул active_language или languages"
     }
 
     $dbg = Invoke-RestMethod -Uri "http://127.0.0.1:8799/api/debug" -TimeoutSec 3
