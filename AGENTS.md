@@ -21,11 +21,12 @@ This repository is a personal fork (`origin`: `hiez1337/viralcut`) tracking the 
 
 When asked to pull updates from the original developer:
 
-1. Fetch and fast-forward `main` from `upstream`:
+1. Fetch and fast-forward `main` from `upstream` (**never push upstream `v*` tags to `origin`** — upstream's `.github/workflows/build.yml` triggers an automatic upstream release on `v*` tags):
    ```powershell
    git fetch upstream
    git checkout main
    git merge --ff-only upstream/main
+   git push origin main
    ```
 2. Switch to `custom` and rebase onto the updated `main`:
    ```powershell
