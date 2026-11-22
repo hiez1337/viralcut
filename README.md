@@ -277,7 +277,7 @@ build_windows_lite.ps1       [fork] локальная сборка + smoke-test
 .github/workflows/
   custom-ci.yml              [fork] автопрогон всех тестов для push / PR в custom
   custom-release.yml         [fork] ручная сборка Lite-релиза в GitHub Actions
-release/fork-v1.4.1-1/       описание и контрольные суммы релиза fork-v1.4.1-1
+release/fork-v1.4.2-1/       описание и контрольные суммы актуального Lite-релиза форка
 AGENTS.md                    правила ведения форка и синхронизации с upstream
 CUSTOM_CHANGES.md            полный журнал модификаций форка (EN)
 CUSTOM_CHANGES_ru.md         полный журнал модификаций форка (RU)
@@ -325,7 +325,7 @@ requirements-custom.txt      [fork] зависимости Desktop + CUDA для
 Сборка лёгкого Windows-релиза локально:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1
+powershell -ExecutionPolicy Bypass -File .\build_windows_lite.ps1 -Tag fork-v1.4.2-1 -Version 1.4.2-fork.1
 ```
 
 Структура веток форка:
