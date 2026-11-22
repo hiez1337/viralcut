@@ -144,6 +144,20 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
   - `gh repo view hiez1337/viralcut --json hasIssuesEnabled,hasDiscussionsEnabled` returns `true` for both.
   - Verify links between `README.md`, `CUSTOM_CHANGES.md`, and `CUSTOM_CHANGES_ru.md`.
 
+## Upstream `v1.4.2` Sync & Automated Fork CI (`custom-ci.yml`)
+- **Goal**: Merge upstream `vanwild11/viralcut` `v1.4.2` render fixes (8-frame `_hw_works()` hardware encoder probe, clean `_compose()` / `_run_encode()` fallback to `libx264`, `/api/health` `"hw"` field, detailed clip failure reason in `pipeline.py`, and `tests/test_render.py`) into the fork while preserving all custom features and adding automated CI test runs on `custom` PRs.
+- **New files**:
+  - `.github/workflows/custom-ci.yml`: runs `python -m unittest discover -s tests -v` on `windows-latest` for every push/PR targeting `custom`.
+- **Modified / merged files**:
+  - `viralcut/render.py`: adopted upstream's `_hw_works()`, `_video_args()`, `_run_encode()`, and `_compose()` structure with minimal `custom_debug` process tracking and stream cleanup hooks.
+  - `viralcut/main.py`: combined upstream's `"hw": render.hw_encoder()` in `/api/health` with our `"whisper_model"` and custom endpoints.
+  - `viralcut/pipeline.py`: adopted upstream's detailed failure reason when `rendered == 0`.
+  - `tests/test_custom_features.py`: updated `RenderFallbackTest` for `_run_encode()` and `custom_debug` process unregister verification.
+  - `README.md`, `CUSTOM_CHANGES.md`, `CUSTOM_CHANGES_ru.md`: updated base version to `1.4.2` and documented CI & `tests/test_render.py`.
+- **Verification**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (all tests including upstream `tests/test_render.py` pass).
+  - Verify green `Fork CI (Tests)` check on PR into `custom`.
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

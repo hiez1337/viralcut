@@ -578,7 +578,10 @@ def process_project(pid: str) -> None:
 
         elapsed = round(time.time() - started, 1)
         if rendered == 0:
-            raise RuntimeError("Не удалось отрендерить ни одного клипа.")
+            failed = [c.get("error") for c in db.list_clips(pid) if c.get("status") == "error"]
+            reason = next((e for e in failed if e), "")
+            raise RuntimeError("Не удалось отрендерить ни одного клипа."
+                               + (f" Причина: {str(reason)[:300]}" if reason else ""))
         word = "клип" if rendered % 10 == 1 and rendered % 100 != 11 else (
             "клипа" if 2 <= rendered % 10 <= 4 and not 12 <= rendered % 100 <= 14 else "клипов")
         _update(pid, status="done", progress=100, error=None,
