@@ -476,18 +476,27 @@ def project_retry(pid: str, body: RetryIn = RetryIn()) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
+    options = dict(project.get("options") or {})
+    options["force_hd"] = bool(body.force_hd)
+    if body.force_hd:
+        # HD-повтор всегда целится в 1080p, даже если проект создавали в 360p
+        options["max_height"] = max(1080, int(options.get("max_height") or 0))
+    meta = project.get("meta") or {}
+    segments_hd = bool(body.force_hd and meta.get("segments_mode"))
     running = jobs.is_running(pid)
     if running:
         # текущая обработка ещё останавливается — поставим повтор в очередь после отмены
         pipeline.request_cancel(pid)
     else:
         pipeline.clear_cancel(pid)
-        db.clear_clips(pid)
-    options = dict(project.get("options") or {})
-    options["force_hd"] = bool(body.force_hd)
-    db.update_project(pid, status="queued", stage="В очереди", progress=0, error=None,
+        if segments_hd:
+            db.reset_clips_pending(pid)
+        else:
+            db.clear_clips(pid)
+    stage = "Готовлю HD-версии клипов" if segments_hd else "В очереди"
+    db.update_project(pid, status="queued", stage=stage, progress=0, error=None,
                       options=options)
-    jobs.submit_retry(pid, prepare_only=body.prepare_only)
+    jobs.submit_retry(pid, prepare_only=body.prepare_only, segments_hd=segments_hd)
     return db.get_project(pid) or project
 
 

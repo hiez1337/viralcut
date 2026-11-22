@@ -678,6 +678,26 @@ def probe(url: str, browser: Optional[str] = None) -> Dict[str, Any]:
 AUDIO_FORMAT = "ba[abr<=64]/ba[abr<=96]/ba/b[height<=360]/b"
 
 
+def _extract_direct_audio(url: str, dest_dir: Path, progress: ProgressCb = None) -> Dict[str, Any]:
+    """Звук из прямого файла — обычным ffmpeg, без yt-dlp."""
+    from .config import ffmpeg
+
+    out = dest_dir / "audio.m4a"
+    if progress:
+        progress(0.1, "Извлечение звука")
+    cmd = [ffmpeg(), "-y", "-v", "error", "-rw_timeout", "30000000", "-i", url,
+           "-vn", "-ac", "1", "-ar", "16000",
+           "-c:a", "aac", "-b:a", "96k", str(out)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                          timeout=1800, **subprocess_kwargs())
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size < 5000:
+        raise DownloadError("Не удалось получить звук: " + (proc.stderr or "")[-300:])
+    if progress:
+        progress(0.99, "Звук готов · распознавание речи")
+    return {"path": out, "title": Path(url.split("?")[0]).name or "audio", "duration": None,
+            "uploader": None, "extractor": "direct", "size": out.stat().st_size}
+
+
 def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
                    browser: Optional[str] = None) -> Dict[str, Any]:
     """Скачивает только звук — в разы меньше полного видео."""
@@ -685,6 +705,8 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
 
     ensure_path()
     dest_dir.mkdir(parents=True, exist_ok=True)
+    if is_direct_media(url):
+        return _extract_direct_audio(url, dest_dir, progress)
     outtmpl = str(dest_dir / "audio.%(ext)s")
     timings = {"started": None, "finished": None, "bytes": 0, "slow_since": None}
 
@@ -775,11 +797,55 @@ def download_audio(url: str, dest_dir: Path, progress: ProgressCb = None,
     }
 
 
+def _cut_direct_section(url: str, dest_dir: Path, start: float, end: float,
+                        progress: ProgressCb = None, max_height: int = 1080) -> Path:
+    """Вырезает фрагмент из прямого HTTP/локального файла без yt-dlp."""
+    from .config import ffmpeg
+
+    out = dest_dir / "section.mp4"
+    duration = max(0.5, end - start)
+    height = "" if max_height >= 1080 else f",scale=-2:{int(max_height)}"
+    if progress:
+        progress(0.1, "Нарезка фрагмента")
+    cmd = [ffmpeg(), "-y", "-v", "error", "-rw_timeout", "30000000",
+           "-ss", f"{max(0.0, start):.3f}", "-t", f"{duration:.3f}", "-i", url,
+           "-vf", f"scale=trunc(iw/2)*2:trunc(ih/2)*2{height}",
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+           "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
+                          timeout=max(120.0, duration * 6), **subprocess_kwargs())
+    if proc.returncode != 0 or not out.exists() or out.stat().st_size < 10000:
+        raise DownloadError("Не удалось вырезать фрагмент: " + (proc.stderr or "")[-300:])
+    if progress:
+        progress(0.99, "Фрагмент готов")
+    return out
+
+
 def download_section(url: str, dest_dir: Path, start: float, end: float,
                      progress: ProgressCb = None, browser: Optional[str] = None,
                      max_height: int = 1080, force_hd: bool = False,
                      meta_out: Optional[Dict[str, Any]] = None) -> Path:
     """Скачивает только фрагмент видео (для экономного режима)."""
+    if is_direct_media(url):
+        ensure_path()
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        path = _cut_direct_section(url, dest_dir, start, end, progress, max_height)
+        if meta_out is not None:
+            from . import utils
+
+            info = utils.probe(path)
+            h = int(info.get("height") or 0)
+            meta_out.update({
+                "width": int(info.get("width") or 0),
+                "height": h,
+                "source_height": h,
+                "max_height": max_height,
+                "quality": f"{h}p" if h else None,
+                "selected_format": "direct",
+                "fallback": False,
+                "fallback_reason": None,
+            })
+        return path
     path, meta = custom_downloader.download_section_smart(
         url, dest_dir, start, end,
         progress=progress, browser=browser,

@@ -115,9 +115,16 @@ def _median(values: Sequence[float], window: int = 5) -> List[float]:
     return out
 
 
-def _smooth(values: List[Optional[float]], alpha: float = 0.25,
-            max_speed: float = 160.0, dt: float = 0.5) -> List[float]:
-    """Заполняет пропуски, сглаживает EMA и ограничивает скорость движения окна."""
+def _smooth(values: List[Optional[float]], alpha: float = 0.22,
+            max_speed: float = 160.0, dt: float = 0.5,
+            deadband: float = 0.0) -> List[float]:
+    """Заполняет пропуски, сглаживает EMA, гасит дребезг и ограничивает скорость.
+
+    Три причины «дёрганой» картинки: шум детектора (метры прыгают на десятки
+    пикселей между кадрами), слишком быстрый EMA и отсутствие мёртвой зоны —
+    окно отрабатывает микродвижения головы. Медиана + медленный EMA + deadband
+    оставляют движение плавным, но не дают лицу выйти из кадра.
+    """
     filled: List[float] = []
     last: Optional[float] = None
     for v in values:
@@ -135,22 +142,102 @@ def _smooth(values: List[Optional[float]], alpha: float = 0.25,
         return []
     default = known[len(known) // 2]
     filled = [default if math.isnan(v) else v for v in filled]
-    med = _median(filled, 3)
+    med = _median(filled, 5)
 
     out: List[float] = []
     current = med[0]
     for target in med:
         current += (target - current) * alpha
-        delta = current - (out[-1] if out else current)
+        prev = out[-1] if out else current
+        delta = current - prev
         limit = max_speed * dt
         if abs(delta) > limit:
-            current = (out[-1] if out else current) + math.copysign(limit, delta)
+            current = prev + math.copysign(limit, delta)
+        elif abs(current - prev) < deadband:
+            # микродрожание: держим окно на месте, а не бегаем за шумом детектора
+            current = prev
         out.append(current)
     return out
 
 
+def _densify(times: List[float], values: List[float], fps: float = 6.0) -> Tuple[List[float], List[float]]:
+    """Уплотняет путь до 6 кадров в секунду.
+
+    ffmpeg интерполирует ключевые кадры линейно, поэтому при 2 замерах в секунду
+    движение выглядит ступеньками. Частые keyframe превращают его в плавную панораму.
+    """
+    if len(times) < 2 or not values:
+        return times, values
+    try:
+        import numpy as np
+
+        start, end = float(times[0]), float(times[-1])
+        count = max(2, int(round((end - start) * fps)) + 1)
+        dense_t = np.linspace(start, end, count)
+        dense_v = np.interp(dense_t, np.asarray(times, dtype=float), np.asarray(values, dtype=float))
+        # лёгкое сглаживание по плотной сетке: убирает изломы на стыках
+        if count > 5:
+            kernel = np.array([1.0, 2.0, 3.0, 2.0, 1.0])
+            kernel /= kernel.sum()
+            padded = np.pad(dense_v, (2, 2), mode="edge")
+            dense_v = np.convolve(padded, kernel, mode="valid")
+        return [round(float(t), 3) for t in dense_t], [round(float(v), 1) for v in dense_v]
+    except Exception:  # noqa: BLE001 — без numpy остаются исходные точки
+        return times, values
+
+
+def _rdp(times: List[float], values: List[float], tolerance: float) -> List[int]:
+    """Алгоритм Дугласа–Пекера: оставляет только точки, меняющие форму пути."""
+    n = len(times)
+    if n <= 2:
+        return list(range(n))
+    keep = {0, n - 1}
+    stack = [(0, n - 1)]
+    while stack:
+        start, end = stack.pop()
+        if end - start < 2:
+            continue
+        t0, t1 = times[start], times[end]
+        v0, v1 = values[start], values[end]
+        span = max(1e-6, t1 - t0)
+        worst, worst_i = 0.0, -1
+        for i in range(start + 1, end):
+            # отклонение точки от прямой (в пикселях)
+            predicted = v0 + (values[i] - v0) * 0 if False else v0 + (v1 - v0) * ((times[i] - t0) / span)
+            dev = abs(values[i] - predicted)
+            if dev > worst:
+                worst, worst_i = dev, i
+        if worst > tolerance and worst_i > 0:
+            keep.add(worst_i)
+            stack.append((start, worst_i))
+            stack.append((worst_i, end))
+    return sorted(keep)
+
+
+def _simplify_path(times: List[float], xs: List[float], ys: List[float],
+                   max_points: int = 140) -> Tuple[List[float], List[float], List[float]]:
+    """Сжимает путь до допустимого числа keyframe.
+
+    ffmpeg парсит выражение целиком: при ~200+ слагаемых он падает с
+    «Missing ')' or too many args», и рендер умирает. Дуглас–Пекер оставляет
+    только точки, без которых форма пути меняется заметнее допуска, поэтому
+    плавное движение описывается десятками точек, а не сотнями.
+    """
+    if len(times) <= 3:
+        return times, xs, ys
+    tol = 0.6
+    for _ in range(6):
+        idx = sorted(set(_rdp(times, xs, tol)) | set(_rdp(times, ys, tol)))
+        if len(idx) <= max_points:
+            return [times[i] for i in idx], [xs[i] for i in idx], [ys[i] for i in idx]
+        tol *= 1.8
+    step = max(1, len(times) // max_points)
+    idx = list(range(0, len(times), step)) + [len(times) - 1]
+    return [times[i] for i in idx], [xs[i] for i in idx], [ys[i] for i in idx]
+
+
 def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16",
-                    sample_fps: float = 2.0, max_width: int = 960) -> Optional[Dict[str, Any]]:
+                    sample_fps: float = 3.0, max_width: int = 960) -> Optional[Dict[str, Any]]:
     """Анализирует фрагмент и возвращает keyframes окна кадрирования.
 
     Результат: {"x": [...], "y": [...], "times": [...], "crop_w": int, "crop_h": int}
@@ -238,11 +325,14 @@ def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16"
                 speaker_idx = 0
             elif len(faces) > 1 and len(motion) == len(faces):
                 best = max(range(len(motion)), key=lambda k: motion[k])
-                # смена говорящего только при явном перевесе и не чаще раза в 1.2 с:
-                # иначе окно дёргается между людьми на каждом кадре
                 current = motion[speaker_idx] if speaker_idx < len(motion) else 0.0
-                if (best != speaker_idx and motion[best] > max(1.2, current * 1.6)
-                        and ts - last_switch > 1.2):
+                best_motion = motion[best]
+                far = abs(faces[best]["cx"] - faces[speaker_idx]["cx"]) > crop_w * 0.9
+                # Переключаемся на другого человека только когда он явно говорит,
+                # а текущий молчит (или он рядом и просто активнее). Иначе окно
+                # прыгает между людьми и картинка «дёргается» — главная жалоба.
+                strong = best_motion > max(2.0, current * (4.0 if far else 2.2))
+                if (best != speaker_idx and strong and ts - last_switch > 2.5):
                     speaker_idx = best
                     last_switch = ts
             speaker = speaker_idx
@@ -272,21 +362,31 @@ def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16"
                     "faces": 0, "samples": len(samples), "coverage": 0.0,
                     "source": [src_w, src_h]}
 
-        smooth_x = _smooth(xs, alpha=0.5, max_speed=max(60.0, crop_w * 0.6), dt=dt)
-        smooth_y = _smooth(ys, alpha=0.3, max_speed=max(40.0, crop_h * 0.4), dt=dt)
+        smooth_x = _smooth(xs, alpha=0.22, max_speed=max(70.0, crop_w * 0.5), dt=dt,
+                           deadband=crop_w * 0.006)
+        smooth_y = _smooth(ys, alpha=0.16, max_speed=max(45.0, crop_h * 0.3), dt=dt,
+                           deadband=crop_h * 0.006)
 
         max_x = max(0.0, src_w - crop_w)
         max_y = max(0.0, src_h - crop_h)
+        base_times = [float(ts) for (ts, _, _) in samples]
         times: List[float] = []
         path_x: List[float] = []
         path_y: List[float] = []
-        for (ts, _, _), cx, cy in zip(samples, smooth_x, smooth_y):
+        for ts, cx, cy in zip(base_times, smooth_x, smooth_y):
             x = max(0.0, min(max_x, cx - crop_w / 2))
             # голова должна оставаться в кадре целиком: держим лицо по центру-верху
             y = max(0.0, min(max_y, cy - crop_h * 0.42))
             times.append(round(ts, 3))
             path_x.append(round(x, 1))
             path_y.append(round(y, 1))
+
+        # густая сетка keyframe: движение перестаёт быть ступеньками
+        # (x и y уплотняем по одной и той же исходной сетке времени)
+        times, path_x = _densify(base_times, path_x, fps=6.0)
+        _, path_y = _densify(base_times, path_y, fps=6.0)
+        # и сжимаем до разумного числа точек: ffmpeg не ест выражения-простыни
+        times, path_x, path_y = _simplify_path(times, path_x, path_y)
 
         face_frames = sum(1 for _, f, _ in samples if f)
         return {

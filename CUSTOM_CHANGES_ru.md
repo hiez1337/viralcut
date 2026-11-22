@@ -158,6 +158,16 @@
   - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (проходят все тесты, включая новые тесты рендера `tests/test_render.py`).
   - Зелёный статус проверки `Fork CI (Tests)` в Pull Request в ветку `custom`.
 
+## Синхронизация с upstream `v1.4.3` (плавное кадрирование, Full HD из эконом-режима и прямые ссылки)
+- **Цель**: Объединить релиз `vanwild11/viralcut` `v1.4.3` (плавное кадрирование 3 fps + медиана 5 + `deadband` + сжатие пути Дугласом–Пекером против падения FFmpeg на длинных клипах, пересборка эконом-проекта в 1080p без повторного Whisper и нарезка прямых HTTP-ссылок через локальный ffmpeg) с доработками форка (`custom_downloader`, защита от гонки при повторе и скрытие окон консоли ffmpeg на Windows).
+- **Изменённые / объединённые файлы**:
+  - `viralcut/reframe.py`, `viralcut/db.py`, `web/app.js`, `tests/test_reframe.py`, `tests/test_render.py`: чистое слияние с сохранением кэширования `_haar_cascade()`.
+  - `viralcut/downloader.py`: добавлен перехват прямых ссылок (`_extract_direct_audio` / `_cut_direct_section` с `subprocess_kwargs()` и заполнением `meta_out`) до вызова `custom_downloader.download_section_smart()`.
+  - `viralcut/main.py`, `viralcut/jobs.py`, `viralcut/pipeline.py`: объединена пересборка эконом-режима в 1080p (`db.reset_clips_pending`) с безопасной сериализацией `jobs.submit_retry(..., segments_hd=...)` и передачей `meta_out`.
+  - `README.md`, `CUSTOM_CHANGES.md`, `CUSTOM_CHANGES_ru.md`: базовая версия обновлена до `1.4.3`.
+- **Проверка работоспособности**:
+  - `.\.venv-win\Scripts\python.exe -m unittest discover -s tests -v` (включая новый 36-секундный тест рендера `LongClipRenderTest`).
+
 <!-- Шаблон для будущих изменений:
 ## [Название функции / исправления]
 - **Цель**: Зачем сделано изменение и ожидаемое поведение.

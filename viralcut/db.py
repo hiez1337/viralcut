@@ -266,6 +266,15 @@ def clear_clips(project_id: str) -> None:
         conn.execute("DELETE FROM clips WHERE project_id=?", (project_id,))
 
 
+def reset_clips_pending(project_id: str) -> int:
+    """Возвращает готовые клипы в очередь — при пересборке в HD."""
+    with connect() as conn:
+        cur = conn.execute(
+            "UPDATE clips SET status='pending', error=NULL, updated_at=? WHERE project_id=?",
+            (time.time(), project_id))
+        return cur.rowcount
+
+
 def reset_stale_jobs() -> None:
     """Помечает задачи, прерванные остановкой сервера."""
     with connect() as conn:

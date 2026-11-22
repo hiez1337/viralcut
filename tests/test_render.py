@@ -68,3 +68,22 @@ class RenderTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class LongClipRenderTest(unittest.TestCase):
+    """Длинный клип: выражение кадрирования не должно превышать лимит ffmpeg."""
+
+    def test_long_clip_with_crop_renders(self):
+        import tempfile
+        from viralcut import reframe
+
+        tmp = Path(tempfile.mkdtemp(prefix="vc-long-"))
+        src = make_source(tmp / "src.mp4", seconds=36.0)
+        crop = reframe.build_crop_path(src, 0.0, 36.0, aspect="9:16")
+        self.assertIsNotNone(crop)
+        expr_x, expr_y = reframe.crop_expressions(crop)
+        self.assertLess(len(expr_x), 2000, "слишком длинное x-выражение: ffmpeg упадёт")
+        out = tmp / "long.mp4"
+        render.render_clip(src, 0.0, 36.0, out, aspect="9:16", mode="auto", crop_path=crop)
+        self.assertTrue(out.exists())
+        self.assertGreater(out.stat().st_size, 100_000)
