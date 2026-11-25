@@ -2,15 +2,25 @@
 from __future__ import annotations
 
 import os
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Dict
 
-from . import db, live, pipeline
+from . import db, live, pipeline, resources
 from .config import MAX_WORKERS
 
 _project_pool = ThreadPoolExecutor(max_workers=max(1, MAX_WORKERS), thread_name_prefix="project")
-_clip_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="clip")
+# Размер пула фиксирован (его нельзя менять на ходу), а фактическое число
+# параллельных рендеров ограничивает шлагбаум по «мощности» из настроек.
+_clip_pool = ThreadPoolExecutor(max_workers=max(1, resources.max_render_workers()),
+                                thread_name_prefix="clip")
+_clip_gate = resources.ConcurrencyGate(resources.render_workers)
+_lock = threading.RLock()
+_clip_running: set[str] = set()
+_agent_edits: list[Dict[str, Any]] = []
+_AGENT_HISTORY_LIMIT = 50
 
 # Каждый эфир — отдельный поток. Раньше стримы шли через пул на 3 места, и
 # несколько «ждущих эфир» записей навсегда занимали очередь: следующая запись
@@ -141,13 +151,84 @@ def submit_process(pid: str) -> None:
     _guarded(pid, lambda: pipeline.process_project(pid))
 
 
-def submit_rerender(clip_id: str, payload: Dict[str, Any]) -> None:
-    db.update_clip(clip_id, status="rendering", error=None)
+def submit_rerender(clip_id: str, payload: Dict[str, Any], *,
+                    agent_edit: bool = False, undo: Dict[str, Any] | None = None) -> bool:
+    with _lock:
+        if clip_id in _clip_running:
+            return False
+        previous = db.get_clip(clip_id)
+        if not previous or (agent_edit and previous["status"] != "ready"):
+            return False
+        db.update_clip(clip_id, status="rendering", error=None)
+        _clip_running.add(clip_id)
 
     def work() -> None:
         try:
-            pipeline.rerender_clip(clip_id, payload)
+            with _clip_gate:
+                if undo is None:
+                    rendered = pipeline.rerender_clip(clip_id, payload)
+                else:
+                    rendered = pipeline.rerender_clip(clip_id, payload, restore=undo["before"])
+                with _lock:
+                    if undo is not None:
+                        _agent_edits.remove(undo)
+                        prior = next((event for event in reversed(_agent_edits)
+                                      if event["id"] == clip_id), None)
+                        if prior:
+                            prior["revision"] = rendered["updated_at"]
+                    elif agent_edit:
+                        last = next((event for event in reversed(_agent_edits)
+                                     if event["id"] == clip_id), None)
+                        if last is not None and last["revision"] != previous["updated_at"]:
+                            _agent_edits[:] = [event for event in _agent_edits if event["id"] != clip_id]
+                        _agent_edits.append({
+                            "id": clip_id, "project_id": previous["project_id"],
+                            "revision": rendered["updated_at"],
+                            "before": {key: previous[key] for key in ("settings", "words")},
+                        })
+                        # Не удаляем запись, пока по ней выполняется отмена.
+                        while len(_agent_edits) > _AGENT_HISTORY_LIMIT:
+                            oldest = next((i for i, event in enumerate(_agent_edits)
+                                           if event["id"] not in _clip_running), None)
+                            if oldest is None:
+                                break
+                            _agent_edits.pop(oldest)
+                    else:
+                        _agent_edits[:] = [event for event in _agent_edits if event["id"] != clip_id]
         except Exception as exc:  # noqa: BLE001
-            db.update_clip(clip_id, status="error", error=str(exc)[:500])
+            previous_ready = (previous["status"] == "ready" and previous.get("path")
+                              and Path(previous["path"]).is_file())
+            db.update_clip(clip_id, status="ready" if previous_ready else "error", error=str(exc)[:500])
+            with _lock:
+                latest = next((event for event in reversed(_agent_edits)
+                               if event["id"] == clip_id), None)
+                if latest and latest["revision"] == previous["updated_at"] and previous_ready:
+                    current = db.get_clip(clip_id)
+                    if current and current["settings"] == previous["settings"] and current["words"] == previous["words"]:
+                        latest["revision"] = current["updated_at"]
+            print(f"[render] пересборка клипа {clip_id}: {exc}", file=sys.stderr, flush=True)
+        finally:
+            with _lock:
+                _clip_running.discard(clip_id)
 
     _clip_pool.submit(work)
+    return True
+
+
+def undo_agent_edit(project_id: str, clip_id: str | None = None) -> tuple[bool, str]:
+    """Ставит откат последней успешной правки агента в очередь рендера."""
+    with _lock:
+        event = next((record for record in reversed(_agent_edits)
+                      if record["project_id"] == project_id
+                      and (clip_id is None or record["id"] == clip_id)), None)
+        if event is None:
+            return False, "Готовых правок агента для отмены пока нет."
+        cid = event["id"]
+        if cid in _clip_running:
+            return False, "Клип ещё пересобирается. Дождитесь завершения и повторите отмену."
+        clip = db.get_clip(cid)
+        if not clip or clip["status"] != "ready" or clip["updated_at"] != event["revision"]:
+            return False, "Клип изменился после правки агента. Отмена недоступна."
+        if not submit_rerender(cid, {}, undo=event):
+            return False, "Не удалось поставить отмену в очередь."
+        return True, f"Возвращаю предыдущую версию клипа №{clip['idx'] + 1}."

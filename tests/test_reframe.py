@@ -76,3 +76,20 @@ class PathStabilityTest(unittest.TestCase):
         path = self._path("52175-1080.mp4")
         gap = max(path["times"][i + 1] - path["times"][i] for i in range(len(path["times"]) - 1))
         self.assertLess(gap, 2.0, "слишком редкие keyframe — движение будет ступеньками")
+
+
+class CoarsePathTest(unittest.TestCase):
+    """Аварийный путь: редкие точки, если ffmpeg отверг длинное выражение."""
+
+    def test_coarse_path_is_smaller(self):
+        path = {
+            "times": [i * 0.1 for i in range(400)],
+            "x": [100 + i * 0.2 for i in range(400)],
+            "y": [50 + i * 0.05 for i in range(400)],
+            "crop_w": 608, "crop_h": 1080, "source": [1920, 1080],
+        }
+        coarse = reframe._coarse_path(path, max_points=18)
+        self.assertLessEqual(len(coarse["times"]), 18)
+        self.assertEqual(len(coarse["times"]), len(coarse["x"]))
+        expr, _ = reframe.crop_expressions(coarse)
+        self.assertLess(len(expr), 600)

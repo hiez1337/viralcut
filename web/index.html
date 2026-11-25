@@ -69,7 +69,46 @@
       </button>
 
       <div class="side-foot">
-        <div class="health" id="health"><span class="dot"></span><span id="healthText">Проверка движка…</span></div>
+        <div class="hud-dock" id="hudDock">
+          <div class="hud collapsed" id="sysCard">
+            <button class="hud-head" id="sysToggle" type="button" aria-expanded="false" aria-controls="sysBody" title="Свернуть/развернуть">
+              <span class="hud-dot" id="sysDot"></span>
+              <span class="hud-title">Нагрузка</span>
+              <span class="hud-chip" id="sysHw">GPU</span>
+              <span class="hud-chevron">▾</span>
+            </button>
+            <div class="hud-body" id="sysBody">
+              <div class="sys-row">
+                <span class="sys-label">CPU</span>
+                <span class="sys-bar"><i id="sysCpuBar" style="width:0%"></i></span>
+                <b class="sys-val" id="sysCpuVal">—</b>
+              </div>
+              <div class="sys-row">
+                <span class="sys-label">RAM</span>
+                <span class="sys-bar"><i id="sysRamBar" style="width:0%"></i></span>
+                <b class="sys-val" id="sysRamVal">—</b>
+              </div>
+              <div class="sys-row">
+                <span class="sys-label">GPU</span>
+                <span class="sys-bar"><i id="sysGpuBar" style="width:0%"></i></span>
+                <b class="sys-val" id="sysGpuVal">—</b>
+              </div>
+              <div class="hud-foot">
+                <span id="sysRamText">—</span>
+                <span id="sysJob" class="hud-job"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <button class="settings-btn" id="helpBtn" type="button" title="Помощник: расскажет, как всё устроено">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3m0 12v3M3 12h3m12 0h3M5.6 5.6l2.1 2.1m8.6 8.6 2.1 2.1m0-12.8-2.1 2.1M7.7 16.3l-2.1 2.1"/></svg>
+          Помощник
+        </button>
+        <button class="settings-btn" id="settingsBtn" type="button">
+          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+          Настройки
+        </button>
+        <div class="health" id="health"><span class="dot"></span><span id="healthText">Проверка движка…</span><small class="app-version" id="appVersion"></small></div>
         <div class="hint">Всё обрабатывается локально на этом компьютере. Видео никуда не отправляется.</div>
       </div>
     </aside>

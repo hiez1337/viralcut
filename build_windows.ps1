@@ -1,7 +1,8 @@
 # Сборка ViralCut для Windows 10/11 (x64) в один exe-каталог + ZIP.
 # Запуск:  powershell -ExecutionPolicy Bypass -File build_windows.ps1
 param(
-    [string]$Version = "1.2.2",
+    # Пусто — версия берётся из viralcut/_version.py (единый источник истины).
+    [string]$Version = "",
     [switch]$SkipModel
 )
 
@@ -26,6 +27,12 @@ if (-not (Test-Path ".venv-win\Scripts\python.exe")) {
 $venvPy = Join-Path $PSScriptRoot ".venv-win\Scripts\python.exe"
 $venvPip = Join-Path $PSScriptRoot ".venv-win\Scripts\pip.exe"
 
+if (-not $Version) {
+    $Version = (& $venvPy "tools\version.py").Trim()
+    if (-not $Version) { throw "Не удалось прочитать версию из tools/version.py" }
+}
+Write-Host "[ViralCut] версия: $Version" -ForegroundColor Cyan
+
 & $venvPy -m pip install --upgrade pip
 & $venvPip install -r requirements-desktop.txt pyinstaller
 
@@ -49,6 +56,10 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 Write-Host "[ViralCut] упаковываю $zip..." -ForegroundColor Cyan
 Compress-Archive -Path "dist\ViralCut" -DestinationPath $zip -CompressionLevel Optimal
 
+$hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+"$hash  $(Split-Path $zip -Leaf)" | Out-File -Encoding ascii (Join-Path $outDir "SHA256SUMS-windows.txt")
+
 Write-Host ""
+Write-Host "SHA256: $hash"
 Write-Host "Готово: $zip" -ForegroundColor Green
 Write-Host "Запуск: dist\ViralCut\ViralCut.exe"

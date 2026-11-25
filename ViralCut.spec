@@ -22,6 +22,7 @@ _APP_VERSION = _read_version()
 
 import glob
 import shutil
+import os
 import sys
 from pathlib import Path
 
@@ -34,7 +35,7 @@ datas = [("web", "web"), ("assets", "assets")]
 
 # Node + PO-провайдер для HD с YouTube. На Windows архив собирается отдельно,
 # без него приложение работает, но YouTube может ограничиться 360p.
-vendor = Path("desktop/vendor.tar.gz")
+vendor = Path(os.environ.get("VIRALCUT_VENDOR_TARBALL") or "desktop/vendor.tar.gz")
 if vendor.is_file():
     datas.append((str(vendor), "bundle"))
 
@@ -67,6 +68,7 @@ hiddenimports = [
     "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan.on",
     "anyio._backends._asyncio",
+    "viralcut.diagnostics",  # разбор app.log импортируется из эндпоинта лениво
 ] + collect_submodules("yt_dlp_plugins") + collect_submodules("fontTools")
 
 if IS_MAC:
@@ -153,5 +155,9 @@ if IS_MAC:
             "NSRequiresAquaSystemAppearance": False,
             "LSApplicationCategoryType": "public.app-category.video",
             "NSHumanReadableCopyright": "ViralCut",
+            # Intel-сборка по умолчанию считается на дискретной карте:
+            # без этого macOS выбирает встроенную (и меняет её на ходу).
+            **({"NSSupportsAutomaticGraphicsSwitching": False}
+               if os.environ.get("VIRALCUT_FORCE_DISCRETE_GPU") == "1" else {}),
         },
     )

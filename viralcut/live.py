@@ -445,7 +445,10 @@ def _ad_overlap(start: float, end: float, intervals: List[Dict[str, Any]]) -> fl
 
 def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "aspect": opts.get("aspect", "9:16"), "mode": opts.get("mode", "auto"),
+        # в эфире по умолчанию показываем весь кадр (рабочее поле), а не кроп
+        # по лицу: иначе клип превращается в крупный план стримера
+        "aspect": opts.get("aspect", "9:16"),
+        "mode": opts.get("mode", "blur") if opts.get("mode") != "crop" else "crop",
         "subtitles": opts.get("subtitles", True), "accent": opts.get("accent", "yellow"),
         "uppercase": opts.get("uppercase", True), "show_hook": opts.get("show_hook", True),
         "focus_x": 0.5, "sub_size": int(opts.get("sub_size", 118)),
@@ -593,7 +596,7 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                                    cand["title"], cand["hook"], cand["caption"], clip_words,
                                    settings, status="rendering")
                 try:
-                    _render_live_clip(workdir, clip, win_start, settings)
+                    _render_live_clip(workdir, clip, win_start, settings, opts)
                     db.update_clip(clip["id"], status="ready", error=None)
                     ready_count += 1
                 except Cancelled:
@@ -633,7 +636,9 @@ def _absolute_words(words: List[Dict[str, Any]], clip_start: float) -> List[Dict
 
 
 def _render_live_clip(workdir: Path, clip: Dict[str, Any], win_start: float,
-                      settings: Dict[str, Any]) -> None:
+                      settings: Dict[str, Any],
+                      opts: Optional[Dict[str, Any]] = None, *,
+                      clip_updates: Optional[Dict[str, Any]] = None) -> None:
     start = float(clip["start"]) - win_start
     end = float(clip["end"]) - win_start
     src = workdir / f"src_{clip['id']}.mp4"
@@ -658,7 +663,8 @@ def _render_live_clip(workdir: Path, clip: Dict[str, Any], win_start: float,
               "end": float(w["end"]) - win_start - start} for w in clip["words"]]
     virtual = {**clip, "start": 0.0, "end": end - start, "words": words}
     try:
-        pipeline._render_one(src, workdir, virtual, settings)
+        pipeline._render_one(src, workdir, virtual, settings, None, {**(opts or {}), "audio_track": 0},
+                             clip_updates=clip_updates, timeline_offset=float(clip["start"]))
     finally:
         src.unlink(missing_ok=True)
 

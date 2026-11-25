@@ -131,6 +131,18 @@ FONTS: Dict[str, Dict[str, Any]] = {
         "label": "Underdog", "family": "Underdog",
         "file": "Underdog-Regular.ttf", "cap": 0.710, "avg": 0.943,
     },
+    "geologica": {
+        "label": "Geologica Bold", "family": "Geologica Bold",
+        "file": "Geologica-Bold.ttf", "cap": 0.700, "avg": 1.087,
+    },
+    "ibmplexcond": {
+        "label": "IBM Plex Sans Condensed SemiBold", "family": "IBM Plex Sans Cond SmBld",
+        "file": "IBMPlexSansCondensed-SemiBold.ttf", "cap": 0.698, "avg": 0.923,
+    },
+    "rubikmono": {
+        "label": "Rubik Mono One", "family": "Rubik Mono One",
+        "file": "RubikMonoOne-Regular.ttf", "cap": 0.700, "avg": 1.488,
+    },
 }
 
 POSITIONS = ("bottom", "middle", "top")
@@ -206,8 +218,21 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# Запас по ширине: если libass не найдёт наш шрифт и подставит системный,
+# он обычно шире на 15–20%, и без запаса строки вылезали за кадр.
+_WIDTH_RESERVE = 1.15
+# Оценка ширины для авто-уменьшения: системный шрифт-замена шире нашего на
+# 15–20%, поэтому считаем с запасом — иначе уменьшение просто не срабатывало.
+_SHRINK_RESERVE = 1.18
+
+
+def _char_advance(font: Dict[str, Any], size: int) -> float:
+    """Средняя ширина символа в пикселях для этого шрифта и размера."""
+    return max(0.3, float(font["avg"])) * max(20, size) * _WIDTH_FACTOR
+
+
 def _chars_per_line(font: Dict[str, Any], size: int) -> int:
-    advance = max(0.3, float(font["avg"])) * max(20, size) * _WIDTH_FACTOR
+    advance = _char_advance(font, size) * _WIDTH_RESERVE
     return max(8, min(24, int(_SAFE_WIDTH / advance)))
 
 
@@ -250,6 +275,33 @@ def _cues(words: List[Dict[str, Any]], max_chars: int = 32, max_words: int = 6,
     return cues
 
 
+def _merge_short_cues(cues: List[List[Dict[str, Any]]], clip_len: float,
+                      max_chars: int, max_words: int) -> List[List[Dict[str, Any]]]:
+    """Объединяет слишком короткие реплики, если вместе они помещаются в кадр."""
+    merged: List[List[Dict[str, Any]]] = []
+
+    def fits(left: List[Dict[str, Any]], right: List[Dict[str, Any]]) -> bool:
+        return (len(left) + len(right) <= max_words
+                and len(" ".join(word["word"] for word in left + right)) <= max_chars)
+
+    for cue in cues:
+        if merged:
+            previous = merged[-1]
+            available = cue[0]["start"] - previous[0]["start"]
+            same_frame = round(cue[0]["start"] * 100) == round(previous[0]["start"] * 100)
+            if same_frame or (available < 0.35 and fits(previous, cue)):
+                previous.extend(cue)
+                continue
+        merged.append(list(cue))
+    if len(merged) > 1:
+        previous, last = merged[-2:]
+        if (clip_len - last[0]["start"] < 0.35
+                and last[0]["start"] - previous[-1]["end"] < 0.35
+                and fits(previous, last)):
+            previous.extend(merged.pop())
+    return merged
+
+
 def _pos_tag(position: str, offset: int) -> str:
     """Возвращает override-тег положения. offset > 0 — выше/дальше от края."""
     if position == "top":
@@ -257,6 +309,9 @@ def _pos_tag(position: str, offset: int) -> str:
         return f"\\an8\\pos({PLAY_W // 2},{y})"
     if position == "middle":
         y = max(120, min(PLAY_H - 120, 960 - offset))
+        if free_pos and len(free_pos) == 2:
+            return (f"\\an5\\pos({int(float(free_pos[0]) * PLAY_W)},"
+                    f"{int(float(free_pos[1]) * PLAY_H)})")
         return f"\\an5\\pos({PLAY_W // 2},{y})"
     y = max(200, min(PLAY_H - 80, 1580 - offset))
     return f"\\an2\\pos({PLAY_W // 2},{y})"
@@ -270,10 +325,10 @@ def to_srt(words: List[Dict[str, Any]], start: float, end: float,
            max_words: int = 6) -> str:
     """SRT для тех, кто монтирует сам: слова собираются в короткие реплики."""
     def stamp(seconds: float) -> str:
-        seconds = max(0.0, float(seconds) - start)
-        hours, rest = divmod(int(seconds), 3600)
+        total = max(0, round((float(seconds) - start) * 1000))
+        seconds, millis = divmod(total, 1000)
+        hours, rest = divmod(seconds, 3600)
         minutes, secs = divmod(rest, 60)
-        millis = int(round((seconds - int(seconds)) * 1000))
         return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
 
     cues: List[List[Dict[str, Any]]] = []
@@ -360,6 +415,7 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
               show_hook: bool = True, sub_size: int = 118, hook_size: int = 96,
               font: str = "montserrat",
               position: str = "bottom", offset: int = 0,
+              free_pos: Optional[List[float]] = None,
               speed: str = "calm") -> str:
     """Собирает ASS-файл для фрагмента. Тайминги слов абсолютные (от начала видео)."""
     accent_color = ACCENTS.get(accent, ACCENTS["yellow"])
@@ -382,6 +438,8 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
 
     local = []
     for w in words:
+        if float(w["end"]) <= clip_start:
+            continue
         s = max(0.0, float(w["start"]) - clip_start)
         e = max(s + 0.05, float(w["end"]) - clip_start)
         if s >= clip_len:
@@ -391,16 +449,11 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
             continue
         if uppercase:
             token = token.upper()
-        local.append({"word": token, "start": s, "end": min(e, clip_len)})
+        # На точности ASS последнему слову нужна хотя бы одна сотая секунды.
+        local.append({"word": token, "start": min(s, round(clip_len, 2) - 0.01),
+                      "end": min(e, clip_len)})
 
-    # Whisper иногда даёт одинаковые/пересекающиеся тайминги слов — выравниваем,
-    # иначе несколько реплик рисуются одновременно и текст накладывается.
     local.sort(key=lambda item: item["start"])
-    cursor = 0.0
-    for item in local:
-        item["start"] = max(item["start"], cursor)
-        item["end"] = max(item["end"], item["start"] + 0.08)
-        cursor = item["end"]
 
     if show_hook and hook.strip():
         hook_text = _clean(hook).upper() if uppercase else _clean(hook)
@@ -408,60 +461,60 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
             hook_text = hook_text[:49].rsplit(" ", 1)[0].rstrip(" ,.-—") + "…"
         hook_lines = _wrap(hook_text, max(10, int(chars * 1.15)), 3)
         body = "\\N".join(hook_lines)
+        # Хук тоже не должен вылезать за кадр при широком подставленном шрифте.
+        hook_widest = max((len(line) for line in hook_lines), default=0) * _char_advance(
+            info, hook_size_eff)
+        hook_shrink = 1.0
+        if hook_widest > _SAFE_WIDTH:
+            hook_shrink = max(0.6, _SAFE_WIDTH / (hook_widest * _SHRINK_RESERVE))
+        hook_size_tag = (f"\\fs{max(30, int(round(hook_size_eff * hook_shrink)))}"
+                         if hook_shrink < 0.995 else "")
         start, end = 0.15, min(clip_len - 0.1, max(1.8, min(4.2, clip_len * 0.3)))
         # если субтитры сверху — хук уводим вниз, чтобы не перекрывались
         hook_pos = "\\an2\\pos(540,1700)" if position == "top" else "\\an8\\pos(540,240)"
         events.append(
             f"Dialogue: 1,{ass_time(start)},{ass_time(end)},Hook,,0,0,0,,"
-            f"{{{hook_pos}\\fad(180,220)\\fscx104\\fscy104}}"
+            f"{{{hook_pos}\\fad(180,220){hook_size_tag}\\fscx104\\fscy104}}"
             f"{body}"
         )
 
     # Короткие реплики + караоке-подсветка: текст не «мигает» на каждом слове,
     # а плавно закрашивается цветом акцента и висит ещё немного после речи.
     cue_chars = max(12, min(int(chars * 2 - 2), int(preset["max_chars"])))
-    cues = _cues(local, max_chars=cue_chars, max_words=int(preset["max_words"]),
-                 max_gap=float(preset["max_gap"]))
-
-    timed: List[Any] = []
-    for index, cue in enumerate(cues):
-        if not cue:
-            continue
-        start = max(0.0, float(cue[0]["start"]))
-        end = min(clip_len, max(float(cue[-1]["end"]) + float(preset["hold"]),
-                                start + float(preset["min_cue"])))
-        if index + 1 < len(cues) and cues[index + 1]:
-            nxt = max(start + 0.3, float(cues[index + 1][0]["start"]) - 0.02)
-            end = min(end, nxt)
-        timed.append((cue, start, end))
-
+    max_words = int(preset["max_words"])
+    cues = _cues(local, max_chars=cue_chars, max_words=max_words, max_gap=float(preset["max_gap"]))
+    cues = _merge_short_cues(cues, clip_len, cue_chars, max_words)
     fade_in, fade_out = preset["fade"]
-    for cue, cue_start, cue_end in timed:
-        if cue_end - cue_start < 0.35:
-            continue
+    for index, cue in enumerate(cues):
+        cue_start = cue[0]["start"]
+        spoken_end = max(word["end"] for word in cue)
+        next_start = cues[index + 1][0]["start"] if index + 1 < len(cues) else clip_len
+        cue_end = min(next_start, max(spoken_end + float(preset["hold"]),
+                                     cue_start + float(preset["min_cue"])))
         tokens = [w["word"] for w in cue]
         # перенос строк: 1–2 строки, сбалансированные по ширине
         line_groups = [[i for i in range(len(tokens))]]
         total_len = sum(len(t) + 1 for t in tokens) - 1
         if total_len > chars and len(tokens) > 1:
-            best, best_diff = None, 1e9
+            # Переносим всегда, когда текст не влезает в одну строку: раньше при
+            # неудачном подборе вся реплика оставалась одной длинной строкой и
+            # уезжала за края кадра. Теперь выбираем разбиение с самой короткой
+            # «длинной» строкой.
+            best, best_score = None, None
             for split in range(1, len(tokens)):
                 left = " ".join(tokens[:split])
                 right = " ".join(tokens[split:])
-                if len(left) > chars + 2 or len(right) > chars + 2:
-                    continue
-                diff = abs(len(left) - len(right))
-                if diff < best_diff:
-                    best, best_diff = split, diff
+                score = (max(len(left), len(right)), abs(len(left) - len(right)))
+                if best_score is None or score < best_score:
+                    best, best_score = split, score
             if best:
                 line_groups = [list(range(best)), list(range(best, len(tokens)))]
 
         # длительности \k: каждое слово подсвечивается ровно в свой момент
         karaoke: List[int] = []
         for wi, word in enumerate(cue):
-            nxt = float(cue[wi + 1]["start"]) if wi + 1 < len(cue) else float(cue_end)
-            duration = max(0.03, nxt - float(word["start"]))
-            karaoke.append(max(1, int(round(duration * 100))))
+            nxt = cue[wi + 1]["start"] if wi + 1 < len(cue) else cue_end
+            karaoke.append(max(0, round(min(nxt, cue_end) * 100) - round(word["start"] * 100)))
 
         rendered: List[str] = []
         for group in line_groups:
@@ -469,7 +522,22 @@ def build_ass(words: List[Dict[str, Any]], clip_start: float, clip_end: float,
                 f"{{\\k{karaoke[ti]}}}{tokens[ti]}" for ti in group
             ))
         body = "\\N".join(rendered)
-        tags = (f"\\fad({int(fade_in)},{int(fade_out)})"
+        # Если строка шире безопасной области (длинное слово или подставленный
+        # системный шрифт), уменьшаем кегль этой реплики: текст остаётся в кадре.
+        advance = _char_advance(info, size)
+        widest = max((len(" ".join(tokens[i] for i in group)) for group in line_groups),
+                     default=0)
+        width_px = widest * advance
+        # Длинное слово перенести нельзя: его строка почти наверняка вылезет за
+        # края, если libass подставит более широкий системный шрифт.
+        longest_word = max((len(token) for token in tokens), default=0)
+        shrink = 1.0
+        if width_px > _SAFE_WIDTH or longest_word > chars:
+            shrink = max(0.6, _SAFE_WIDTH / (width_px * _SHRINK_RESERVE))
+        size_tag = f"\\fs{max(40, int(round(size * shrink)))}" if shrink < 0.995 else ""
+        fade_limit = max(0, round((cue_end - cue_start) * 200))
+        tags = (f"\\fad({min(fade_in, fade_limit)},{min(fade_out, fade_limit)})"
+                f"{size_tag}"
                 f"\\fscx104\\fscy104\\t(0,170,\\fscx100\\fscy100)")
         events.append(
             f"Dialogue: 0,{ass_time(cue_start)},{ass_time(cue_end)},Sub,,0,0,0,,"

@@ -21,7 +21,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Base-1.4.3-8b5cf6?style=flat-square" alt="Base 1.4.3">
+  <img src="https://img.shields.io/badge/Base-1.6.0-8b5cf6?style=flat-square" alt="Base 1.6.0">
   <img src="https://img.shields.io/badge/License-MIT-22c55e?style=flat-square" alt="MIT">
   <img src="https://img.shields.io/badge/Windows-10%2F11-0078D4?logo=windows&style=flat-square" alt="Windows 10/11">
   <img src="https://img.shields.io/badge/NVIDIA-CUDA%20%2F%20NVENC-76B900?logo=nvidia&logoColor=white&style=flat-square" alt="NVIDIA CUDA / NVENC">
@@ -47,7 +47,7 @@
   <a href="#оригинальный-проект-upstream-и-лицензия">Оригинальный проект</a>
 </p>
 
-> **О репозитории:** это персональный форк [`hiez1337/viralcut`](https://github.com/hiez1337/viralcut) поверх оригинального [`vanwild11/viralcut`](https://github.com/vanwild11/viralcut) (база `1.4.3`).
+> **О репозитории:** это персональный форк [`hiez1337/viralcut`](https://github.com/hiez1337/viralcut) поверх оригинального [`vanwild11/viralcut`](https://github.com/vanwild11/viralcut) (база `1.6.0`).
 > Форк адаптирован под Windows 10/11 с поддержкой GPU NVIDIA (CUDA + NVENC) и удобным выбором модели Whisper прямо в интерфейсе, но также работает на CPU и macOS/Linux.
 
 ---

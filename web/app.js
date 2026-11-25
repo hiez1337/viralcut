@@ -78,7 +78,10 @@ const BUNDLED_FONT_OPTIONS = [
   { key: "marckscript", label: "Marck Script", group: "Акцентные" },
   { key: "ruslan", label: "Ruslan Display", group: "Акцентные" },
   { key: "stalinist", label: "Stalinist One", group: "Акцентные" },
-  { key: "underdog", label: "Underdog", group: "Акцентные" }
+  { key: "underdog", label: "Underdog", group: "Акцентные" },
+  { key: "geologica", label: "Geologica Bold", group: "База" },
+  { key: "ibmplexcond", label: "IBM Plex Sans Condensed SemiBold", group: "Узкие" },
+  { key: "rubikmono", label: "Rubik Mono One", group: "Акцентные" }
 ];
 
 const BUNDLED_GROUPS = Object.fromEntries(BUNDLED_FONT_OPTIONS.map((f) => [f.key, f.group]));
@@ -94,6 +97,9 @@ function fontOptionsHTML(selected) {
 }
 
 const BUNDLED_FONT_CSS = {
+  geologica: "VCGeologica",
+  ibmplexcond: "VCPlexCond",
+  rubikmono: "VCRubikMono",
   montserrat: "VCMontserrat",
   russo: "VCRusso",
   ptsans: "VCPTSans",
@@ -233,6 +239,8 @@ const state = {
   pollTimer: null,
   mainKey: "",
   health: null,
+  encoderFallbackId: null,
+  bootDone: false,
   probeOpen: false,
   probeUrl: "",
   probeData: null,
@@ -256,9 +264,13 @@ const state = {
     subPos: "bottom",
     subOffset: 0,
     subSpeed: "calm",
+    cutPauses: false,
     cookies: "",
+    aiMode: false,
+    aiPrompt: "",
     fontTarget: "#fontSelect"
-  }
+  },
+  ai: null
 };
 
 /* ---------------- API ---------------- */
@@ -316,8 +328,8 @@ function renderSidebar() {
     const when = new Date((p.created_at || 0) * 1000).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
     const sub = p.status === "done" ? `${p.meta?.clips || ""} клипов · ${when}` : p.status === "error" ? "ошибка" : p.status === "running" ? "обработка…" : when;
     return `<button class="project-item ${state.current === p.id ? "active" : ""}" data-project="${p.id}">
-      <span class="status-dot ${esc(p.status)}"></span>
-      <span style="min-width:0">
+      <span class="project-item-icon">${p.meta?.live ? ICONS.play : OPT_ICONS.frame}<span class="status-dot ${esc(p.status)}"></span></span>
+      <span class="project-item-text">
         <span class="p-title">${esc(p.title || p.url)}</span>
         <span class="p-meta">${esc(sub)}</span>
       </span>
@@ -341,23 +353,58 @@ function heroHTML() {
   const o = state.opts;
   const counts = [5, 10, 20, 30, 50, 0];
   return `
-  <section class="hero">
-    <div class="eyebrow">${ICONS.spark} Автонарезка для Shorts · Reels · TikTok</div>
-    <h1 class="hero-title">Одно видео —<br><span class="grad">десятки вирусных клипов</span></h1>
-    <p class="hero-sub">Вставьте ссылку на YouTube, Twitch, TikTok, Instagram, VK или файл. Приложение найдёт самые цепляющие моменты, обрежет их в вертикаль с умным кадрированием по лицу, наложит субтитры с подсветкой слов и отрендерит готовые ролики.</p>
 
-    <div class="url-box">
-      <input id="urlInput" type="text" placeholder="https://youtube.com/watch?v=… или https://twitch.tv/videos/…" autocomplete="off" spellcheck="false" />
-      <button class="btn-primary" id="startBtn">Сделать нарезки</button>
+  <section class="hero hero-home">
+    <div class="hero-intro">
+      <div>
+        <div class="eyebrow">${ICONS.spark} Автонарезка для Shorts · Reels · TikTok</div>
+        <h1 class="hero-title">Одно видео —<br><span class="grad">десятки вирусных клипов</span></h1>
+        <p class="hero-sub">Добавьте ссылку или видеофайл. ViralCut найдёт яркие моменты, кадрирует их под нужный формат и наложит субтитры.</p>
+      </div>
+      <figure class="hero-visual" aria-label="Пример кадрирования в вертикальный клип">
+        <div class="hero-comparison">
+          <div>
+            <div class="hero-source-frame">
+              <img src="/static/examples/podcast.webp" alt="">
+              <span class="hero-crop-guide"></span>
+            </div>
+            <div class="hero-frame-label"><b>Исходное видео</b><span>16:9</span></div>
+          </div>
+          <span class="hero-arrow" aria-hidden="true">→</span>
+          <div>
+            <div class="hero-clip-frame">
+              <img src="/static/examples/podcast.webp" alt="">
+              <span class="hero-example-caption">С ЧЕГО НАЧАТЬ<br><em>ПЕРВЫЙ</em> ПРОЕКТ?</span>
+            </div>
+            <div class="hero-frame-label"><b>Клип</b><span>9:16</span></div>
+          </div>
+        </div>
+      </figure>
     </div>
-    <div class="upload-row">
-      <span>или</span>
-      <button class="link-btn" id="uploadBtn">загрузите видеофайлом</button>
-      <span>· mp4, mov, webm · длинные подкасты и интервью</span>
+    <div class="source-panel">
+      <label for="urlInput">Ссылка на видео</label>
+      <div class="url-box">
+        <input id="urlInput" type="text" placeholder="https://youtube.com/watch?v=…" autocomplete="off" spellcheck="false" />
+        <button class="btn-primary" id="startBtn">Сделать нарезки</button>
+      </div>
+      <div class="upload-row">
+        <button class="link-btn" id="uploadBtn">Загрузить видеофайл</button>
+        <span>MP4, MOV, WEBM</span>
+        <span class="source-services">YouTube, Twitch, TikTok, Instagram, VK</span>
+      </div>
+      <div class="hero-note">Для Twitch укажите ссылку на запись или клип. Идущая трансляция открывается на вкладке «Прямой эфир».</div>
     </div>
-    <div class="hero-note">Twitch: VOD или клип. Прямой эфир — на вкладке «Прямой эфир» слева.</div>
-
-    <div class="group-title"><span>Параметры нарезки</span><span class="group-hint">всё можно поменять позже</span></div>
+    <div class="ai-mode ${o.aiMode ? "on" : ""}" id="aiModeCard">
+      <label class="toggle ai-toggle">
+        <input type="checkbox" id="aiModeToggle" ${o.aiMode ? "checked" : ""}/>
+        <span class="track"></span>
+        <span><b>ИИ-режим</b> — модель сама выберет вирусные моменты</span>
+      </label>
+      <textarea id="aiPrompt" class="ai-prompt" rows="2" maxlength="600"
+        placeholder="Например: нарежь самые вирусные моменты, сделай цепляюще, без вступлений">${esc(o.aiPrompt || "")}</textarea>
+      <div class="set-hint" id="aiModeHint">${aiModeHint()}</div>
+    </div>
+    <div class="group-title"><span>Параметры нарезки</span><span class="group-hint">Можно поменять позже</span></div>
     <div class="options">
       <div class="opt wide" id="vcWhisperSlot"></div>
       <div class="opt">
@@ -378,7 +425,7 @@ function heroHTML() {
         ${optIcon("aspect", "ico-cyan")}
         <span class="opt-label">Формат</span>
         <div class="seg" data-group="aspect">
-          ${["9:16", "1:1", "16:9"].map((a) => `<button data-val="${a}" class="${o.aspect === a ? "active" : ""}">${a}</button>`).join("")}
+          ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<button data-val="${a}" class="${o.aspect === a ? "active" : ""}">${a}</button>`).join("")}
         </div>
       </div>
       <div class="opt">
@@ -400,8 +447,33 @@ function heroHTML() {
           </div>
         </div>
       </div>
+      <div class="opt">
+        ${optIcon("frame", "ico-blue")}
+        <span class="opt-label">Паузы</span>
+        <div class="opt-control">
+          <label class="toggle"><input type="checkbox" id="cutPausesToggle" ${o.cutPauses ? "checked" : ""}/><span class="track"></span><span>Вырезать паузы</span></label>
+        </div>
+      </div>
+      <div class="opt">
+        ${optIcon("subs", "ico-blue")}
+        <span class="opt-label">Язык видео</span>
+        <div class="seg" data-group="language">
+          ${[["auto","Авто"],["ru","Русский"],["en","English"]].map(([v,l]) => `<button data-val="${v}" class="${(o.language || "auto") === v ? "active" : ""}">${l}</button>`).join("")}
+        </div>
+      </div>
+      <div class="opt">
+        ${optIcon("access", "ico-gray")}
+        <span class="opt-label">Доступ к источнику</span>
+        <select id="cookiesSelect" aria-label="Доступ к источнику">
+          <option value="" ${o.cookies === "" ? "selected" : ""}>Без cookies</option>
+          <option value="chrome" ${o.cookies === "chrome" ? "selected" : ""}>Cookies из Chrome</option>
+          <option value="safari" ${o.cookies === "safari" ? "selected" : ""}>Cookies из Safari</option>
+          <option value="firefox" ${o.cookies === "firefox" ? "selected" : ""}>Cookies из Firefox</option>
+          <option value="edge" ${o.cookies === "edge" ? "selected" : ""}>Cookies из Edge</option>
+        </select>
+      </div>
       <div class="opt wide">
-        <span class="opt-head">${optIcon("style", "ico-pink")}<span class="opt-label">Стиль субтитров</span></span>
+        <div class="opt-head">${optIcon("style", "ico-pink")}<span class="opt-label">Стиль субтитров</span></div>
         <div class="substyle">
           <label class="mini-field">
             <span>Шрифт</span>
@@ -435,27 +507,7 @@ function heroHTML() {
           <div class="font-sample" id="fontSample" style="font-family:${FONT_CSS[o.subFont] || "VCMontserrat"};--hl:${ACCENT_HEX[o.accent] || ACCENT_HEX.yellow}">ПРИМЕР <span class="hl">СУБТИТРОВ</span></div>
         </div>
       </div>
-      <div class="opt">
-        ${optIcon("access", "ico-gray")}
-        <span class="opt-label">Доступ к источнику</span>
-        <select id="cookiesSelect">
-          <option value="">Без cookies</option>
-          <option value="chrome">Cookies из Chrome</option>
-          <option value="safari">Cookies из Safari</option>
-          <option value="firefox">Cookies из Firefox</option>
-          <option value="edge">Cookies из Edge</option>
-        </select>
-      </div>
     </div>
-
-    <a class="tg-hero" href="https://t.me/ivanAI22" data-external="https://t.me/ivanAI22" target="_blank" rel="noopener">
-      <span class="tg-ico">
-        <svg viewBox="0 0 24 24" fill="currentColor"><path d="M21.7 3.4 2.9 11.2c-.9.3-.9 1.5 0 1.8l4.6 1.6 1.7 5.4c.2.7 1.1.9 1.6.3l2.4-2.6 4.5 3.3c.6.4 1.5.1 1.7-.6l3-15.2c.2-.9-.7-1.6-1.5-1.3zM9.4 14.1l8.6-5.5-6.8 7-.2 3.1-1.6-4.6z"/></svg>
-      </span>
-      <span>Обновления и примеры клипов — в Telegram</span>
-      <b>@ivanAI22</b>
-      <span class="tg-arrow">↗</span>
-    </a>
   </section>`;
 }
 
@@ -483,6 +535,30 @@ function bindHero() {
   }
   const subs = $("#subsToggle");
   if (subs) subs.addEventListener("change", () => { state.opts.subtitles = subs.checked; });
+  const cut = $("#cutPausesToggle");
+  if (cut) cut.addEventListener("change", () => { state.opts.cutPauses = cut.checked; });
+
+  const aiToggle = $("#aiModeToggle");
+  const aiCard = $("#aiModeCard");
+  if (aiToggle) {
+    const syncAi = () => {
+      state.opts.aiMode = aiToggle.checked;
+      if (aiCard) aiCard.classList.toggle("on", aiToggle.checked);
+    };
+    aiToggle.addEventListener("change", async () => {
+      syncAi();
+      if (aiToggle.checked) {
+        const ai = state.ai || (await loadAiStatus());
+        if (!ai || !ai.configured) {
+          toast("Сначала добавьте ключ ИИ в настройках", "err");
+          openSettings();
+        }
+      }
+    });
+    syncAi();
+  }
+  const aiPrompt = $("#aiPrompt");
+  if (aiPrompt) aiPrompt.addEventListener("input", () => { state.opts.aiPrompt = aiPrompt.value; });
 
   const cookies = $("#cookiesSelect");
   if (cookies) cookies.addEventListener("change", () => { state.opts.cookies = cookies.value; });
@@ -526,6 +602,26 @@ function bindHero() {
   if (window.vcWhisper) window.vcWhisper.mount("#vcWhisperSlot");
 }
 
+function aiModeHint() {
+  const ai = state.ai;
+  if (!ai) return "Проверяю настройки ИИ…";
+  if (!ai.configured) {
+    return "Ключ ИИ не задан — включите его в «Настройках → ИИ-помощник», иначе нарезка пойдёт обычным алгоритмом.";
+  }
+  return `Модель: ${esc(ai.model || "")} (${esc(ai.provider || "")}). Моменты, хуки и подписи выберет ИИ, клипы соберутся сами.`;
+}
+
+async function loadAiStatus() {
+  try {
+    state.ai = await api("/api/ai");
+  } catch (e) {
+    state.ai = { configured: false };
+  }
+  const hint = $("#aiModeHint");
+  if (hint) hint.textContent = aiModeHint();
+  return state.ai;
+}
+
 function heroOptions() {
   const d = DUR_PRESETS[state.opts.dur] || DUR_PRESETS["20-45"];
   return {
@@ -542,9 +638,13 @@ function heroOptions() {
     sub_position: state.opts.subPos,
     sub_offset: state.opts.subOffset,
     sub_speed: state.opts.subSpeed,
+    cut_pauses: state.opts.cutPauses,
+    language: window.vcWhisper && window.vcWhisper.getLanguage ? window.vcWhisper.getLanguage() : (state.opts.language || "auto"),
+    whisper_model: window.vcWhisper ? window.vcWhisper.getSelected() : undefined,
     cookies_browser: state.opts.cookies,
-    language: window.vcWhisper && window.vcWhisper.getLanguage ? window.vcWhisper.getLanguage() : "auto",
-    whisper_model: window.vcWhisper ? window.vcWhisper.getSelected() : undefined
+    ai_mode: Boolean(state.opts.aiMode),
+    ai_prompt: state.opts.aiPrompt || "",
+    autostart: Boolean(state.opts.aiMode)
   };
 }
 
@@ -594,16 +694,32 @@ function askQuality(url) {
     method: "POST",
     body: JSON.stringify({ url, cookies_browser: state.opts.cookies })
   }).then((data) => {
-    if (!state.probeOpen) return;
+    if (!state.probeOpen || state.probeUrl !== url) return;
     state.probeData = data;
     renderQuality(data);
   }).catch((err) => {
+    if (!state.probeOpen || state.probeUrl !== url) return;
     const body = $("#qualityBody");
     if (!body) return;
+    if (isYouTubeSource(url)) {
+      renderQuality({ title: url, probeError: err.message, recommended: 1080,
+        options: [1080, 720, 480].map(height => ({ height, confirmed: false })) });
+      return;
+    }
     body.innerHTML = `<div class="tmpl-error">${esc(err.message)}</div>
       <button class="btn-ghost" id="qualitySkip">Продолжить без рекомендации (1080p)</button>`;
     $("#qualitySkip").addEventListener("click", () => createFromProbe(1080));
   });
+}
+
+function isYouTubeSource(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return ["youtube.com", "youtu.be", "youtube-nocookie.com"].some(domain =>
+      host === domain || host.endsWith("." + domain));
+  } catch (_) {
+    return false;
+  }
 }
 
 function renderQuality(data) {
@@ -612,28 +728,33 @@ function renderQuality(data) {
   const rec = data.recommended;
   const cards = data.options.map((o) => `
     <button class="quality-card ${o.height === rec ? "recommended" : ""}" data-quality="${o.height}">
-      <span class="q-height">${o.height}p</span>
-      <span class="q-size">${formatSize(o.size_mb)}</span>
+      <span class="q-height">${isYouTubeSource(state.probeUrl) && o.height === 1080 ? "Full HD 1080p" : o.height + "p"}</span>
+      <span class="q-size">${o.confirmed === false ? "Проверить при загрузке" : formatSize(o.size_mb)}</span>
       ${o.height === rec ? '<span class="q-badge">рекомендуем</span>' : ""}
     </button>`).join("");
   body.innerHTML = `
     <div class="quality-title">${esc(data.title)}</div>
-    <div class="quality-meta">${fmtDur(data.duration)} · ${esc(data.uploader || "")}</div>
+    ${data.probeError ? `<div class="tmpl-error">${esc(data.probeError)}</div>` :
+      `<div class="quality-meta">${fmtDur(data.duration)} · ${esc(data.uploader || "")}</div>`}
     <div class="quality-cards">${cards}</div>
-    <label class="toggle eco-row"><input type="checkbox" id="qualityEco" ${data.duration > 600 ? "checked" : ""}/><span class="track"></span><span>Экономно: сначала анализ, потом только выбранные моменты</span></label>
+
     <div class="quality-note" id="qualityNote"></div>
     <div class="modal-foot" style="padding:16px 0 0;border:0">
       <button class="btn-ghost" data-close="probe">Отмена</button>
       <button class="btn-primary" id="qualityStart">Скачать и настроить</button>
     </div>`;
   let chosen = rec;
-  state.segmentsChoice = data.duration > 600;
+  state.segmentsChoice = false;
   const note = $("#qualityNote");
   const updateNote = () => {
     const opt = data.options.find((o) => o.height === chosen);
     if (!opt) return;
+    if (opt.confirmed === false) {
+      note.textContent = `Попробуем скачать ${chosen}p. Качество проверим до нарезки.`;
+      return;
+    }
     const eco = $("#qualityEco")?.checked;
-    state.segmentsChoice = !!eco;
+    state.segmentsChoice = false;
     if (eco) {
       const audioMb = data.audio_size_mb || Math.max(1, Math.round(data.duration * 0.012));
       note.textContent = `Сначала только аудио (~${formatSize(audioMb)}), анализ, затем видео скачается лишь для выбранных моментов — обычно в 5–20 раз меньше полного файла.`;
@@ -661,7 +782,7 @@ async function createFromProbe(height) {
   const btn = $("#qualityStart") || $("#qualitySkip");
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Запуск'; }
   try {
-    const options = { ...heroOptions(), max_height: height, segments: state.segmentsChoice };
+    const options = { ...heroOptions(), max_height: height, exact_quality: isYouTubeSource(url), segments: state.segmentsChoice };
     const project = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({ url, options, prepare_only: true })
@@ -683,6 +804,7 @@ async function uploadFile(file) {
   if (file.size > 4 * 1024 * 1024 * 1024) { toast("Файл больше 4 ГБ", "err"); return; }
   const form = new FormData();
   form.append("file", file);
+  form.append("options", JSON.stringify(heroOptions()));
   toast("Загружаю файл…");
   try {
     const project = await api("/api/upload", { method: "POST", body: form });
@@ -729,6 +851,14 @@ async function loadDetail(force) {
   try {
     const detail = await api(`/api/projects/${pid}`);
     if (seq !== state.detailSeq || state.current !== pid) return null;
+    if (state.detail?.project.id === detail.project.id) {
+      const previous = new Map(state.detail.clips.map((clip) => [clip.id, clip]));
+      for (const clip of detail.clips) {
+        if (clip.status === "ready" && clip.error && clip.error !== previous.get(clip.id)?.error) {
+          toast(`Пересборка не удалась. Готовый MP4 доступен. ${clip.error}`, "err");
+        }
+      }
+    }
     state.detail = detail;
     const item = state.projects.find((p) => p.id === detail.project.id);
     if (item) {
@@ -896,12 +1026,14 @@ function clipsGridHTML() {
     const url = `/media/${p}/clips/clip_${String(c.idx + 1).padStart(2, "0")}.mp4?v=${ver}`;
     const preview = c.has_preview ? `/media/${p}/previews/${c.id}.mp4?v=${ver}` : url;
     const thumb = c.thumb ? `/media/${p}/thumbs/${c.id}.jpg?v=${ver}` : "";
-    const wide = (c.settings?.aspect || "9:16") === "16:9" ? " wide" : (c.settings?.aspect || "") === "1:1" ? " square" : "";
+    const aspect = c.settings?.aspect || "9:16";
+    const wide = { "16:9": " wide", "1:1": " square", "4:5": " four-five" }[aspect] || "";
     const sp = c.settings?.score_parts || null;
     const partsLine = sp ? [
       ["хук", sp.hook], ["подача", sp.retention], ["эмоции", sp.emotion],
       ["конкретика", sp.specificity], ["завершённость", sp.completeness],
-    ].filter(([, v]) => typeof v === "number")
+      ["реакция", sp.reaction], ["монтаж", sp.visual],
+    ].filter(([k, v]) => typeof v === "number" && (v > 0.02 || !["реакция", "монтаж"].includes(k)))
       .map(([k, v]) => `<span>${k} ${Math.round(v * 100)}</span>`).join("") : "";
     if (c.status === "error") {
       return `<div class="clip-card${wide}">
@@ -918,24 +1050,23 @@ function clipsGridHTML() {
       </div>`;
     }
     return `<div class="clip-card${wide}" data-clip="${c.id}">
-      <div class="clip-media" data-action="edit">
+      <div class="clip-media" data-action="edit"${thumb ? ` style="--clip-poster:url('${esc(thumb)}')"` : ""}>
         <video src="${preview}#t=0.1" ${thumb ? `poster="${thumb}"` : ""} muted loop playsinline preload="${thumb ? "none" : "metadata"}"></video>
-        <div class="play-hint">${ICONS.play}</div>
+        <button type="button" class="play-hint" aria-label="Открыть клип">${ICONS.play}</button>
         <div class="score-badge ${score >= 70 ? "hot" : ""}" title="Оценка момента по структуре речи, а не прогноз просмотров">⚡ ${score}</div>
         <div class="dur-badge">${fmtDur(dur)}</div>
-        <div class="clip-quick">
-          <button class="glass-btn" data-action="copy" title="Копировать подпись">${ICONS.copy}</button>
-          <button class="glass-btn" data-action="edit" title="Редактировать">${ICONS.edit}</button>
-        </div>
       </div>
       <div class="clip-body">
         <div class="clip-title">${esc(c.title || "Без названия")}</div>
+        <div class="clip-time">${fmtDur(c.start)} – ${fmtDur(c.end)}</div>
         ${partsLine ? `<div class="clip-parts">${partsLine}</div>` : ""}
         <div class="clip-tools">
           <a class="download-btn" href="${url}" download="${esc(c.title || "clip")}.mp4" data-download-clip="${c.id}" title="Скачать MP4">
             ${ICONS.download}<span>Скачать MP4</span>
           </a>
           <a class="srt-btn" href="/api/clips/${c.id}/subtitles.srt" download title="Скачать субтитры (SRT)">SRT</a>
+          <button class="glass-btn" data-action="copy" title="Копировать подпись" aria-label="Копировать подпись">${ICONS.copy}</button>
+          ${c.settings?.segments ? "" : `<button class="glass-btn" data-action="edit" title="Редактировать клип" aria-label="Редактировать клип">${ICONS.edit}</button>`}
         </div>
       </div>
     </div>`;
@@ -971,6 +1102,11 @@ function fallbackHTML(project) {
     return `<div class="warn-box"><strong>1080p не удалось.</strong> ${reason}. Сейчас используется ${m.source_height || "?"}p.
       <button class="link-btn" data-action="retry-hd">Повторить в 1080p</button></div>`;
   }
+  // часть фрагментов скачалась в низком разрешении (например, YouTube отдал SD)
+  if (m.low_res_clips) {
+    return `<div class="warn-box">${m.low_res_clips} из клипов собраны из фрагментов ${m.low_res_height || "SD"}p — источник отдал низкое качество.
+      <button class="link-btn" data-action="retry-hd">Пересобрать в 1080p</button></div>`;
+  }
   // экономный режим собрал клипы из фрагментов ниже 1080p — даём кнопку пересборки
   const econHeight = Number(m.max_height || (project.options && project.options.max_height) || 0);
   if (m.segments_mode && econHeight < 1080) {
@@ -983,25 +1119,44 @@ function fallbackHTML(project) {
 function streamHomeHTML() {
   const streams = state.projects.filter((p) => p.meta && p.meta.live);
   return `
-  <section class="hero">
-    <div class="eyebrow">${ICONS.spark} Прямой эфир</div>
-    <h1 class="hero-title">Нарезки <span class="grad">по ходу стрима</span></h1>
-    <p class="hero-sub">Вставьте ссылку на идущий эфир (Twitch, Kick). Приложение запишет его локально и будет находить моменты каждые несколько минут — клипы появятся до конца трансляции.</p>
-    <div class="url-box">
-      <input id="streamInput" type="text" placeholder="https://www.twitch.tv/канал или https://kick.com/канал" autocomplete="off" spellcheck="false" />
-      <button class="btn-primary" id="streamStartBtn">Записать и нарезать</button>
+  <section class="hero stream-home">
+    <div class="hero-intro">
+      <div>
+        <div class="eyebrow">${ICONS.spark} Прямой эфир</div>
+        <h1 class="hero-title">Нарезки<br><span class="grad">по ходу стрима</span></h1>
+        <p class="hero-sub">Вставьте ссылку на текущий эфир Twitch или Kick. Запись сохранится локально, а первые клипы появятся ещё во время трансляции.</p>
+      </div>
+      <figure class="hero-visual" aria-label="Пример трансляции">
+        <div class="hero-source-frame stream-example">
+          <img src="/static/examples/stream.webp" alt="">
+          <span class="stream-example-label">Пример эфира</span>
+        </div>
+      </figure>
     </div>
-  </section>
-  <div class="section-title"><h3>Активные записи</h3></div>
-  <div class="project-list" id="streamList">${
-    streams.length ? streams.map((p) => `
-      <button class="project-item" data-project="${p.id}">
-        <span class="status-dot live"></span>
-        <span class="pi-title">${esc(p.title || p.url)}</span>
-        <span class="pi-sub">${esc(p.stage || "")} · ${Math.round((p.meta.live_duration || 0) / 60)} мин${
-          streamHint(p.meta) ? ` · ${streamHint(p.meta)}` : ""}</span>
-      </button>`).join("") : `<div class="empty-clips">Записей пока нет — вставьте ссылку на эфир.</div>`
-  }</div>`;
+    <div class="source-panel">
+      <label for="streamInput">Ссылка на трансляцию</label>
+      <div class="url-box">
+        <input id="streamInput" type="text" placeholder="https://www.twitch.tv/канал или https://kick.com/канал" autocomplete="off" spellcheck="false" />
+        <button class="btn-primary" id="streamStartBtn">Записать и нарезать</button>
+      </div>
+      <div class="stream-format">
+        <span>Формат клипов</span>
+        <div class="seg" data-group="aspect">
+          ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<button data-val="${a}" class="${state.opts.aspect === a ? "active" : ""}">${a}</button>`).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="section-title"><h3>Активные записи</h3></div>
+    <div class="project-list stream-list" id="streamList">${streams.length ? streams.map((p) => `
+      <button class="project-item" data-project="${esc(p.id)}">
+        <span class="project-item-icon">${ICONS.play}<span class="status-dot ${["running", "preparing", "queued"].includes(p.status) ? "live" : esc(p.status)}"></span></span>
+        <span class="stream-item-details">
+          <span class="pi-title">${esc(p.title || p.url)}</span>
+          <span class="pi-sub">${Math.round((p.meta.live_duration || 0) / 60)} мин записи</span>
+        </span>
+        <span class="stream-item-stage">${esc(streamHint(p) || p.stage || "")}</span>
+      </button>`).join("") : `<div class="empty-clips">Записей пока нет. Вставьте ссылку на эфир.</div>`}</div>
+  </section>`;
 }
 
 function streamHint(meta) {
@@ -1050,7 +1205,7 @@ function streamHTML(project) {
 function reviewHTML(project) {
   const m = project.meta || {};
   const meta = [
-    m.segments_mode ? "экономный режим" : resLabel(m),
+    resLabel(m),
     project.duration ? fmtDur(project.duration) : "",
     m.pending ? `найдено ${m.pending} моментов` : "",
     m.download_seconds ? `скачано за ${Math.round(m.download_seconds)} с` : ""
@@ -1063,6 +1218,7 @@ function reviewHTML(project) {
     </div>
     <div class="project-actions">
       <button class="btn-primary" data-action="setup">Настроить субтитры</button>
+      <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
       <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
     </div>
@@ -1081,21 +1237,23 @@ function resultsHTML() {
   const { project, clips } = state.detail;
   const ready = clips.filter((c) => c.status === "ready");
   return `
-  <div class="project-head">
+  <div class="project-head results-head">
     <div>
       <h2>${esc(project.title || project.url)}</h2>
       <div class="project-meta">
         <span>${ready.length} ${plural(ready.length, "клип", "клипа", "клипов")}</span>
         ${project.duration ? `<span>${fmtDur(project.duration)} исходник</span>` : ""}
         ${qualityText(project) ? `<span>${esc(qualityText(project))}</span>` : ""}
-        ${project.language ? `<span>язык: ${esc(project.language)}</span>` : ""}
+        ${project.language ? `<span>${esc({ ru: "Русский", en: "English" }[project.language] || project.language)}</span>` : ""}
         ${project.meta?.elapsed ? `<span>обработано за ${Math.round(project.meta.elapsed)} с</span>` : ""}
       </div>
     </div>
     <div class="project-actions">
       ${ready.length ? `<a class="btn-primary" href="/api/projects/${project.id}/zip" data-download-zip="${project.id}" style="display:inline-flex;align-items:center;gap:7px">${ICONS.zip} Скачать всё</a>` : ""}
       <button class="btn-ghost" data-action="folder" title="Открыть папку с готовыми MP4">${ICONS.folder} Открыть папку</button>
+      ${ready.length ? `<button class="btn-ghost" data-action="ai-advice" title="Подсказки по хуку, таймингу и субтитрам">${ICONS.spark} Совет ИИ</button>` : ""}
       ${ready.length ? `<button class="btn-ghost" data-action="smart-all">Пересобрать в умный кроп</button>` : ""}
+      <button class="btn-ghost" data-action="save-source" title="Сохранить скачанное видео в выбранную папку">${ICONS.download} Сохранить видео</button>
       <button class="btn-ghost" data-action="home">${ICONS.back} Новый</button>
       <button class="btn-ghost danger" data-action="delete">${ICONS.trash} Удалить</button>
     </div>
@@ -1107,6 +1265,8 @@ function resultsHTML() {
 
 function renderMain(force) {
   const main = $("#main");
+  $("#newBtn").classList.toggle("active", !state.current && state.homeView !== "streams");
+  $("#streamBtn").classList.toggle("active", !state.current && state.homeView === "streams");
   if (!state.current || !state.detail) {
     if (!state.current) {
       releaseVideos(main);
@@ -1131,13 +1291,15 @@ function renderMain(force) {
     bindClips();
     updateProgress(project);
   } else if (project.status === "review") {
-    main.innerHTML = reviewHTML(project);
+    main.innerHTML = reviewHTML(project) + manualClipHTML() + pipCardHTML(state.detail);
+    initPip(state.detail);
   } else if (project.status === "cancelled") {
     main.innerHTML = cancelledHTML(project);
   } else if (project.status === "error") {
     main.innerHTML = errorHTML(project);
   } else {
-    main.innerHTML = resultsHTML();
+    main.innerHTML = resultsHTML() + manualClipHTML() + pipCardHTML(state.detail);
+    initPip(state.detail);
     bindClips();
   }
 }
@@ -1220,6 +1382,12 @@ $("#main").addEventListener("click", async (e) => {
     return;
   }
 
+  if (action === "ai-advice") {
+    if (!state.detail) return;
+    openAiAdvice(state.detail.project);
+    return;
+  }
+
   if (action === "smart-all") {
     if (!state.detail) return;
     const ready = state.detail.clips.filter((c) => c.status === "ready" || c.status === "error");
@@ -1267,6 +1435,19 @@ $("#main").addEventListener("click", async (e) => {
       openTemplate(pid);
       schedulePoll(600);
     } catch (err) { toast(err.message, "err"); }
+    return;
+  }
+
+  if (action === "save-source") {
+    if (!state.detail) return;
+    const native = window.pywebview && window.pywebview.api;
+    if (!native || !native.save_source) { toast("Доступно в настольном приложении"); return; }
+    try {
+      const res = await native.save_source(state.detail.project.id);
+      if (res && res.ok) toast(`Сохранено: ${res.path}`);
+      else if (res && res.cancelled) { /* отмена — молчим */ }
+      else toast((res && res.error) || "Не удалось сохранить", "err");
+    } catch (e) { toast(e.message, "err"); }
     return;
   }
 
@@ -1393,7 +1574,7 @@ function updateTemplatePreview() {
   const showHook = $("#tpHook").checked;
   const accent = state.tmplAccent || "yellow";
   const width = stage.clientWidth || 340;
-  const px = Math.max(10, Math.round(size * 0.45 * (width / 1080)));
+  const px = Math.max(11, Math.round(size * 0.76 * (width / 1080)));
   cap.style.fontFamily = FONT_CSS[font] || "VCMontserrat";
   cap.style.fontSize = px + "px";
   cap.style.textTransform = upper ? "uppercase" : "none";
@@ -1497,15 +1678,16 @@ function openTemplate(pid) {
 
   $("#modal").innerHTML = `
     <div class="modal-backdrop" data-close="tmpl"></div>
-    <div class="modal-panel tmpl-panel">
+    <div class="modal-panel workbench tmpl-panel" role="dialog" aria-modal="true" aria-labelledby="templateTitle">
       <div class="modal-head">
-        <h3>Настройка субтитров</h3>
-        <button class="icon-btn" data-close="tmpl">${ICONS.close}</button>
+        <h3 id="templateTitle">Настройка субтитров</h3>
+        <button class="icon-btn" data-close="tmpl" aria-label="Закрыть">${ICONS.close}</button>
       </div>
       <div class="tmpl-body">
         <div class="tmpl-left">
+          <div class="preview-heading"><b>Предпросмотр</b><span>${initAspect}</span></div>
           <div class="tmpl-stage" id="tmplStage" style="aspect-ratio:${initAspect}">
-            <video id="tmplVideo" muted loop playsinline></video>
+            <video id="tmplVideo" muted loop playsinline controls aria-label="Предпросмотр субтитров"></video>
             <div class="tmpl-hook" id="tmplHook">ЗАГОЛОВОК КЛИПА</div>
             <div class="tmpl-caption" id="tmplCaption"><span class="w hl">ПРИМЕР</span> <span class="w">СУБТИТРОВ</span></div>
             <div class="tmpl-veil" id="tmplVeil">
@@ -1517,56 +1699,62 @@ function openTemplate(pid) {
           <div class="tmpl-hint">Так будет выглядеть вертикальный кадр. Нажмите на видео для паузы.</div>
         </div>
         <div class="tmpl-right">
-          <div class="field">
+          <div class="form-card field">
             <label>Шаблоны</label>
             <div class="preset-row">
               ${STYLE_PRESETS.map((p) => `<button class="preset-chip" data-preset="${p.key}">${p.label}</button>`).join("")}
             </div>
           </div>
-          <div class="row2">
-            <div class="field">
-              <label>Шрифт</label>
-              <div class="font-pick">
-                <select id="tpFont">
-                  ${fontOptionsHTML("")}
+          <section class="form-card form-stack">
+            <h4>Текст и положение</h4>
+            <div class="row2">
+              <div class="field">
+                <label for="tpFont">Шрифт</label>
+                <div class="font-pick">
+                  <select id="tpFont">
+                    ${fontOptionsHTML("")}
+                  </select>
+                  <button type="button" class="font-add" id="tpFontAdd" title="Загрузить свой шрифт">＋</button>
+                </div>
+              </div>
+              <div class="field">
+                <label>Положение</label>
+                <select id="tpPos">
+                  ${SUB_POSITIONS.map(([k, label]) => `<option value="${k}">${label}</option>`).join("")}
                 </select>
-                <button type="button" class="font-add" id="tpFontAdd" title="Загрузить свой шрифт">＋</button>
+              </div>
+            </div>
+            <div class="row2">
+              <div class="field">
+                <label>Размер <b id="tpSizeVal">118</b></label>
+                <input type="range" id="tpSize" min="70" max="180" step="2" value="118" />
+              </div>
+              <div class="field">
+                <label>Сдвиг <b id="tpOffsetVal">0</b></label>
+                <input type="range" id="tpOffset" min="-120" max="180" step="5" value="0" />
+              </div>
+            </div>
+          </section>
+          <div class="form-card field">
+            <label>Темп субтитров</label>
+            <div class="seg" id="tpSpeed">
+              ${SUB_SPEEDS.map(([k, label]) => `<button data-val="${k}" class="${k === "calm" ? "active" : ""}">${label}</button>`).join("")}
+            </div>
+            <small class="form-hint">В режиме «Спокойно» фразы дольше остаются на экране.</small>
+          </div>
+          <div class="form-card template-decoration">
+            <div class="field">
+              <label>Цвет подсветки</label>
+              <div class="swatches" id="tpAccents">
+                ${swatchesHTML(state.tmplAccent || "yellow")}
               </div>
             </div>
             <div class="field">
-              <label>Положение</label>
-              <select id="tpPos">
-                ${SUB_POSITIONS.map(([k, label]) => `<option value="${k}">${label}</option>`).join("")}
-              </select>
-            </div>
-          </div>
-          <div class="row2">
-            <div class="field">
-              <label>Размер <b id="tpSizeVal">118</b></label>
-              <input type="range" id="tpSize" min="70" max="180" step="2" value="118" />
-            </div>
-            <div class="field">
-              <label>Сдвиг <b id="tpOffsetVal">0</b></label>
-              <input type="range" id="tpOffset" min="-120" max="180" step="5" value="0" />
-            </div>
-          </div>
-          <div class="field">
-            <label>Темп субтитров</label>
-            <div class="seg" id="tpSpeed">
-              ${SUB_SPEEDS.map(([k, label]) => `<button data-val="${k}" class="${k === initSpeed ? "active" : ""}">${label}</button>`).join("")}
-            </div>
-          </div>
-          <div class="field">
-            <label>Цвет подсветки</label>
-            <div class="swatches" id="tpAccents">
-              ${swatchesHTML(state.tmplAccent || "yellow")}
-            </div>
-          </div>
-          <div class="field">
-            <label>Оформление</label>
-            <div style="display:flex;gap:14px;flex-wrap:wrap">
-              <label class="toggle"><input type="checkbox" id="tpUpper" checked/><span class="track"></span><span>КАПСОМ</span></label>
-              <label class="toggle"><input type="checkbox" id="tpHook" checked/><span class="track"></span><span>Хук сверху</span></label>
+              <label>Оформление</label>
+              <div class="toggle-group">
+                <label class="toggle"><input type="checkbox" id="tpUpper" checked/><span class="track"></span><span>КАПСОМ</span></label>
+                <label class="toggle"><input type="checkbox" id="tpHook" checked/><span class="track"></span><span>Хук сверху</span></label>
+              </div>
             </div>
           </div>
           <div class="tmpl-meta" id="tmplMeta"></div>
@@ -1715,7 +1903,7 @@ async function tmplPoll() {
       $("#tmplStart").disabled = false;
       const m = project.meta || {};
       $("#tmplMeta").textContent = [
-        m.segments_mode ? "Экономный режим: видео качается только для выбранных моментов" : "",
+        "",
         m.pending ? `Найдено моментов: ${m.pending}` : "",
         !m.segments_mode && m.source_height ? `Источник: ${resLabel(m)}` : "",
         project.duration ? `Длительность: ${fmtDur(project.duration)}` : ""
@@ -1764,6 +1952,27 @@ function clipUrl(clip) {
   return `/media/${p}/clips/clip_${String(clip.idx + 1).padStart(2, "0")}.mp4?v=${Math.round(clip.updated_at || 0)}`;
 }
 
+async function loadAudioTracks(pid) {
+  const sel = $("#edAudio");
+  if (!sel) return;
+  try {
+    const data = await api(`/api/projects/${pid}/audio`);
+    const tracks = data.tracks || [];
+    if (tracks.length < 2) { sel.closest(".field").style.display = "none"; return; }
+    sel.innerHTML = tracks.map((t, i) => {
+      const lang = (t.language && t.language !== "und") ? t.language.toUpperCase() : "—";
+      const title = t.title ? ` · ${t.title}` : "";
+      return `<option value="${i}" ${i === (data.selected || 0) ? "selected" : ""}>${i + 1}. ${lang}${title}</option>`;
+    }).join("");
+    sel.addEventListener("change", async () => {
+      try {
+        await api(`/api/projects/${pid}/audio`, { method: "POST", body: JSON.stringify({ index: Number(sel.value) }) });
+        toast("Звуковая дорожка выбрана — подействует при следующем рендере");
+      } catch (e) { toast(e.message, "err"); }
+    });
+  } catch (e) { console.error(e); }
+}
+
 function openEditor(clipId) {
   const clip = state.detail.clips.find((c) => c.id === clipId);
   if (!clip) return;
@@ -1780,104 +1989,125 @@ function openEditor(clipId) {
 
   $("#modal").innerHTML = `
     <div class="modal-backdrop" data-close></div>
-    <div class="modal-panel">
+    <div class="modal-panel workbench editor-panel" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
       <div class="modal-head">
-        <h3>Редактировать клип</h3>
-        <button class="icon-btn" data-close>${ICONS.close}</button>
+        <div><h3 id="editorTitle">Редактировать клип</h3><div class="dialog-subtitle">${esc(clip.title || "")}</div></div>
+        <button class="icon-btn" data-close aria-label="Закрыть">${ICONS.close}</button>
       </div>
-      <div class="modal-body">
-        <div class="editor-video"><video id="edVideo" src="${clipUrl(clip)}" controls playsinline></video></div>
-        <div class="editor-fields">
-          <div class="field">
-            <label>Заголовок на видео (хук)</label>
-            <input type="text" id="edHook" maxlength="90" value="${esc(clip.hook || clip.title || "")}" />
-          </div>
-          <div class="field">
-            <label>Текст субтитров <span style="color:var(--muted-2);font-weight:400">— правьте имена и термины, тайминги сохранятся</span></label>
-            <textarea id="edText" rows="3" style="width:100%;resize:vertical">${esc((clip.words || []).map((w) => w.word).join(" "))}</textarea>
-          </div>
-          <div class="row2">
+      <div class="modal-body editor-body">
+        <div class="editor-preview">
+          <div class="preview-heading"><b>Предпросмотр</b><span>${esc(s.aspect || "9:16")}</span></div>
+          <div class="editor-video"><video id="edVideo" src="${clipUrl(clip)}" controls playsinline aria-label="Предпросмотр клипа"></video></div>
+        </div>
+        <div class="form-stack">
+          <section class="form-card form-stack">
+            <h4>Текст клипа</h4>
             <div class="field">
-              <label>Начало</label>
-              <div class="range-row">
-                <input type="range" id="edStart" min="0" max="${maxT}" step="0.1" value="${clip.start}" />
-                <input type="number" id="edStartNum" min="0" max="${maxT}" step="0.1" value="${clip.start.toFixed(1)}" />
+              <label for="edHook">Заголовок на видео (хук)</label>
+              <input type="text" id="edHook" maxlength="90" value="${esc(clip.hook || clip.title || "")}" />
+            </div>
+            <div class="field">
+              <label for="edText">Текст субтитров</label>
+              <textarea id="edText" rows="3" style="width:100%;resize:vertical">${esc((clip.words || []).map((w) => w.word).join(" "))}</textarea>
+              <small class="form-hint">При правке текста тайминги сохранятся.</small>
+            </div>
+          </section>
+          <section class="form-card form-stack">
+            <h4>Границы клипа</h4>
+            <div class="row2">
+              <div class="field">
+                <label for="edStartNum">Начало</label>
+                <div class="range-row">
+                  <input type="range" id="edStart" min="0" max="${maxT}" step="0.1" value="${clip.start}" />
+                  <input type="number" id="edStartNum" min="0" max="${maxT}" step="0.1" value="${clip.start.toFixed(1)}" />
+                </div>
+              </div>
+              <div class="field">
+                <label for="edEndNum">Конец</label>
+                <div class="range-row">
+                  <input type="range" id="edEnd" min="0" max="${maxT}" step="0.1" value="${clip.end}" />
+                  <input type="number" id="edEndNum" min="0" max="${maxT}" step="0.1" value="${clip.end.toFixed(1)}" />
+                </div>
+              </div>
+            </div>
+          </section>
+          <section class="form-card form-stack">
+            <h4>Видео и звук</h4>
+            <div class="row2">
+              <div class="field">
+                <label for="edAspect">Формат</label>
+                <select id="edAspect">
+                  ${["9:16", "1:1", "16:9", "4:5"].map((a) => `<option value="${a}" ${(s.aspect || "9:16") === a ? "selected" : ""}>${a}</option>`).join("")}
+                </select>
+              </div>
+              <div class="field">
+                <label>Звуковая дорожка</label>
+                <select id="edAudio"><option value="0">основная</option></select>
               </div>
             </div>
             <div class="field">
-              <label>Конец</label>
-              <div class="range-row">
-                <input type="range" id="edEnd" min="0" max="${maxT}" step="0.1" value="${clip.end}" />
-                <input type="number" id="edEndNum" min="0" max="${maxT}" step="0.1" value="${clip.end.toFixed(1)}" />
-              </div>
-            </div>
-          </div>
-          <div class="row2">
-            <div class="field">
-              <label>Формат</label>
-              <select id="edAspect">
-                ${["9:16", "1:1", "16:9"].map((a) => `<option value="${a}" ${(s.aspect || "9:16") === a ? "selected" : ""}>${a}</option>`).join("")}
-              </select>
-            </div>
-            <div class="field">
-              <label>Кадрирование</label>
+              <label for="edMode">Кадрирование</label>
               <select id="edMode">
                 <option value="auto" ${s.mode === "auto" ? "selected" : ""}>Умный кроп (по лицу)</option>
                 <option value="blur" ${s.mode === "blur" || !s.mode ? "selected" : ""}>Размытый фон</option>
                 <option value="crop" ${s.mode === "crop" ? "selected" : ""}>По центру</option>
               </select>
             </div>
-          </div>
-          <div class="field">
-            <label>Субтитры</label>
-            <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+          </section>
+        </div>
+        <div class="form-stack">
+          <section class="form-card form-stack">
+            <h4>Субтитры</h4>
+            <div class="toggle-group editor-toggles">
               <label class="toggle"><input type="checkbox" id="edSubs" ${s.subtitles !== false ? "checked" : ""}/><span class="track"></span><span>Показывать</span></label>
               <label class="toggle"><input type="checkbox" id="edUpper" ${s.uppercase !== false ? "checked" : ""}/><span class="track"></span><span>КАПСОМ</span></label>
               <label class="toggle"><input type="checkbox" id="edShowHook" ${s.show_hook !== false ? "checked" : ""}/><span class="track"></span><span>Хук сверху</span></label>
+              <label class="toggle"><input type="checkbox" id="edCutPauses" ${s.cut_pauses ? "checked" : ""}/><span class="track"></span><span>Вырезать паузы</span></label>
             </div>
-          </div>
-          <div class="row2">
-            <div class="field">
-              <label>Шрифт субтитров</label>
-              <div class="font-pick">
-                <select id="edFont">
-                  ${fontOptionsHTML(fontKey)}
-                </select>
-                <button type="button" class="font-add" id="edFontAdd" title="Загрузить свой шрифт">＋</button>
+            <div class="row2">
+              <div class="field">
+                <label for="edFont">Шрифт</label>
+                <div class="font-pick">
+                  <select id="edFont">
+                    ${fontOptionsHTML(fontKey)}
+                  </select>
+                  <button type="button" class="font-add" id="edFontAdd" title="Загрузить свой шрифт">＋</button>
+                </div>
+                <div class="font-sample ed-sample" id="edFontSample" style="font-family:${FONT_CSS[fontKey] || "VCMontserrat"}">ПРИМЕР СУБТИТРОВ</div>
               </div>
-              <div class="font-sample ed-sample" id="edFontSample" style="font-family:${FONT_CSS[fontKey] || "VCMontserrat"}">ПРИМЕР СУБТИТРОВ</div>
+              <div class="field">
+                <label>Положение</label>
+                <select id="edPos">
+                  ${SUB_POSITIONS.map(([k, label]) => `<option value="${k}" ${fontPos === k ? "selected" : ""}>${label}</option>`).join("")}
+                </select>
+              </div>
             </div>
-            <div class="field">
-              <label>Положение</label>
-              <select id="edPos">
-                ${SUB_POSITIONS.map(([k, label]) => `<option value="${k}" ${fontPos === k ? "selected" : ""}>${label}</option>`).join("")}
-              </select>
+            <div class="row2">
+              <div class="field">
+                <label>Размер <b id="edSizeVal">${fontSize}</b></label>
+                <input type="range" id="edSize" min="70" max="180" step="2" value="${fontSize}" />
+              </div>
+              <div class="field">
+                <label>Сдвиг <b id="edOffVal">${fontOffset}</b></label>
+                <input type="range" id="edOffset" min="-120" max="180" step="5" value="${fontOffset}" />
+              </div>
             </div>
-          </div>
-          <div class="row2">
-            <div class="field">
-              <label>Размер <b id="edSizeVal">${fontSize}</b></label>
-              <input type="range" id="edSize" min="70" max="180" step="2" value="${fontSize}" />
-            </div>
-            <div class="field">
-              <label>Сдвиг <b id="edOffVal">${fontOffset}</b></label>
-              <input type="range" id="edOffset" min="-120" max="180" step="5" value="${fontOffset}" />
-            </div>
-          </div>
-          <div class="field">
+          </section>
+          <div class="form-card field">
             <label>Темп субтитров</label>
             <div class="seg" id="edSpeed">
               ${SUB_SPEEDS.map(([k, label]) => `<button data-val="${k}" class="${subSpeed === k ? "active" : ""}">${label}</button>`).join("")}
             </div>
+            <small class="form-hint">В режиме «Спокойно» фразы дольше остаются на экране.</small>
           </div>
-          <div class="field">
+          <div class="form-card field">
             <label>Цвет подсветки</label>
             <div class="swatches" id="edAccents">
               ${swatchesHTML(accent)}
             </div>
           </div>
-          <div class="field">
-            <label>Подпись для публикации</label>
+          <div class="form-card field">
+            <label for="edCaption">Подпись для публикации</label>
             <textarea id="edCaption">${esc(clip.caption || "")}</textarea>
           </div>
         </div>
@@ -1945,6 +2175,7 @@ function openEditor(clipId) {
     const payload = {
       start: Number(start.value),
       end: Number(end.value),
+      audio_track: $("#edAudio").options.length > 1 ? Number($("#edAudio").value) : undefined,
       hook: $("#edHook").value,
       caption: $("#edCaption").value,
       text: (() => {
@@ -1957,6 +2188,7 @@ function openEditor(clipId) {
       subtitles: $("#edSubs").checked,
       uppercase: $("#edUpper").checked,
       show_hook: $("#edShowHook").checked,
+      cut_pauses: $("#edCutPauses").checked,
       accent: chosenAccent,
       sub_font: $("#edFont").value,
       sub_size: Number($("#edSize").value),
@@ -1984,6 +2216,26 @@ function closeModal() {
   modal.classList.add("hidden");
   modal.innerHTML = "";
 }
+
+$("#main").addEventListener("click", async (e) => {
+  if (!e.target.closest("#mcAdd")) return;
+  if (!state.current) return;
+  const start = $("#mcStart").value.trim();
+  const end = $("#mcEnd").value.trim();
+  if (!start || !end) { toast("Укажите начало и конец", "err"); return; }
+  const btn = e.target.closest("#mcAdd");
+  btn.disabled = true;
+  try {
+    await api(`/api/projects/${state.current}/clips`, {
+      method: "POST",
+      body: JSON.stringify({ start, end, trim_silence: $("#mcTrim").checked }),
+    });
+    toast("Клип добавлен — рендерю");
+    poll();
+  } catch (err) {
+    toast(err.message, "err");
+  } finally { btn.disabled = false; }
+});
 
 $("#modal").addEventListener("click", (e) => {
   if (!e.target.closest("[data-close]")) return;
@@ -2068,6 +2320,7 @@ async function checkHealth() {
     const h = await api("/api/health");
     state.health = h;
     const el = $("#health");
+    $("#appVersion").textContent = h.version || "";
     el.classList.toggle("ok", !!h.ok);
     el.classList.toggle("bad", !h.ok);
     const wm = h.whisper_model ? `Whisper ${h.whisper_model}` : "Whisper";
@@ -2112,6 +2365,994 @@ function renderUpdate(data) {
   }
 }
 
+async function pollSystem() {
+  try {
+    const res = await fetch("/api/system");
+    if (!res.ok) return;
+    renderSystem(await res.json());
+  } catch (_) { /* сервер недоступен — оставляем прошлые значения */ }
+}
+
+function sysLevel(percent) {
+  if (percent == null) return "";
+  if (percent >= 85) return "hot";
+  if (percent >= 60) return "warn";
+  return "";
+}
+
+const fmtGb = (mb) => (mb / 1024).toFixed(1).replace(".", ",");
+
+function renderSystem(data) {
+  if (!data) return;
+  const fallback = data.app?.encoder_fallback;
+  if (fallback && fallback.id !== state.encoderFallbackId) {
+    state.encoderFallbackId = fallback.id;
+    const reason = fallback.reason === "gpu_unavailable"
+      ? "Аппаратный кодировщик недоступен."
+      : "Кодирование на видеокарте не удалось.";
+    toast(`${reason} ViralCut продолжает на процессоре.`, "err");
+  }
+  if (data.disabled) {
+    const card = $("#sysCard");
+    if (card) card.style.display = "none";
+    return;
+  }
+  const set = (barId, valId, percent) => {
+    const bar = $(barId);
+    const val = $(valId);
+    if (!bar || !val) return;
+    if (percent == null || Number.isNaN(percent)) {
+      bar.style.width = "0%";
+      bar.className = "";
+      val.textContent = "н/д";
+      return;
+    }
+    bar.style.width = `${Math.max(2, Math.min(100, percent))}%`;
+    bar.className = sysLevel(percent);
+    val.textContent = `${Math.round(percent)}%`;
+  };
+  set("#sysCpuBar", "#sysCpuVal", data.cpu);
+  set("#sysRamBar", "#sysRamVal", data.ram ? data.ram.percent : null);
+  set("#sysGpuBar", "#sysGpuVal", data.gpu ? data.gpu.percent : null);
+
+  // память отдельной строкой — проценты в полоске, гигабайты текстом
+  const ramText = $("#sysRamText");
+  if (ramText) {
+    const ram = data.ram || {};
+    ramText.textContent = ram.total_mb
+      ? `RAM ${fmtGb(ram.used_mb)} / ${fmtGb(ram.total_mb)} ГБ`
+      : "RAM н/д";
+  }
+
+  const chip = $("#sysHw");
+  if (chip) {
+    const name = data.gpu && data.gpu.name ? String(data.gpu.name) : "";
+    chip.textContent = name || (data.app && data.app.hw ? String(data.app.hw).replace("h264_", "") : "GPU");
+    // откуда цифра: pdh (Intel/AMD/NVIDIA), nvidia-smi или ADL для AMD
+    const gpu = data.gpu || {};
+    chip.title = [
+      gpu.vendor ? gpu.vendor.toUpperCase() : "",
+      gpu.discrete ? "дискретная" : "",
+      gpu.source && gpu.source !== "none" ? `источник: ${gpu.source}` : "",
+      Array.isArray(gpu.adapters) && gpu.adapters.length > 1 ? `адаптеры: ${gpu.adapters.join(", ")}` : ""
+    ].filter(Boolean).join(" · ");
+    chip.classList.toggle("discrete", Boolean(gpu.discrete));
+  }
+
+  // текущий процесс: что именно делает приложение
+  const job = $("#sysJob");
+  const dot = $("#sysDot");
+  if (job) {
+    if (data.job && data.job.stage) {
+      const pct = Math.round(data.job.progress || 0);
+      const stage = String(data.job.stage).replace(/ · \d+ с$/, "");
+      job.textContent = `${stage}${pct > 0 ? ` · ${pct}%` : ""}`;
+      job.classList.add("active");
+      job.title = data.job.title || "";
+      if (dot) dot.classList.add("active");
+    } else {
+      job.textContent = "Простой";
+      job.classList.remove("active");
+      job.title = "";
+      if (dot) dot.classList.remove("active");
+    }
+  }
+
+  const worst = Math.max(data.cpu || 0, (data.ram && data.ram.percent) || 0, (data.gpu && data.gpu.percent) || 0);
+  if (dot) {
+    dot.className = `hud-dot ${sysLevel(worst)}`.trim();
+  }
+}
+
+/* ---------------- Настройки ---------------- */
+
+async function chooseFolder(kind) {
+  const native = window.pywebview && window.pywebview.api;
+  const input = kind === "download" ? $("#setDownloadDir") : $("#setClipsDir");
+  if (!native || !native.choose_folder) {
+    toast("Выбор папки доступен в настольном приложении");
+    return;
+  }
+  try {
+    const res = await native.choose_folder(input ? input.value : "");
+    if (res && res.ok && res.path && input) input.value = res.path;
+  } catch (e) {
+    toast(e.message || "Не удалось выбрать папку", "err");
+  }
+}
+
+const POWER_STEPS = [
+  [0, "Экономно"], [25, "Тихо"], [50, "Баланс"], [75, "Быстро"], [90, "Максимум"], [100, "Максимум"],
+];
+
+function powerLabel(value) {
+  const v = Math.max(0, Math.min(100, Number(value) || 0));
+  if (v <= 12) return "Экономно";
+  if (v <= 37) return "Тихо";
+  if (v <= 62) return "Баланс";
+  if (v <= 87) return "Быстро";
+  return "Максимум";
+}
+
+function cpuLimitLabel(value) {
+  const v = Math.max(25, Math.min(100, Number(value) || 100));
+  return v >= 100 ? "Без лимита" : `Не более ${v}%`;
+}
+
+function cpuLimitHint(value, cap) {
+  const v = Math.max(25, Math.min(100, Number(value) || 100));
+  if (v >= 100) return "Процессор не ограничен: обработка идёт на полной скорости.";
+  const mechanism = cap && cap.mechanism === "job_object"
+    ? "Windows сам держит процесс ниже потолка."
+    : "Рендеры приостанавливаются, чтобы не занимать машину целиком.";
+  return `Не более ${v}% процессора. ${mechanism}`;
+}
+
+function gpuPreferenceHint(preference) {
+  if (preference === "integrated") return "Считать на встроенной видеокарте: тише и холоднее, кодирование медленнее.";
+  if (preference === "discrete") return "Считать на дискретной карте: быстрее кодирование. На Windows предпочтение записывается в систему.";
+  return "Система решает сама: обычно встроенная карта, пока не нужна дискретная.";
+}
+
+const AI_PROVIDER_ORDER = ["deepseek", "polza", "openai", "custom"];
+const AI_FALLBACK_MODELS = {
+  deepseek: ["deepseek-chat", "deepseek-reasoner"],
+  polza: ["openai/gpt-4o-mini", "openai/gpt-4o", "deepseek/deepseek-chat"],
+  openai: ["gpt-4o-mini", "gpt-4o"],
+  custom: [],
+};
+
+function aiProviderButtons(current, providers) {
+  const known = providers && providers.length ? providers : [];
+  const list = known.length
+    ? known
+    : AI_PROVIDER_ORDER.map((key) => ({ key, label: key }));
+  return list.map((p) => `<button data-val="${esc(p.key)}" class="${current === p.key ? "active" : ""}">${esc(p.label)}</button>`).join("");
+}
+
+function aiProviderHint(conf) {
+  const note = conf.ai && conf.ai.note ? `${esc(conf.ai.note)} ` : "";
+  if ((conf.ai_provider || "deepseek") === "custom") {
+    return `${note}Укажите базовый URL OpenAI-совместимого сервера, например http://127.0.0.1:11434/v1.`;
+  }
+  return `${note}Запросы уходят с вашим ключом напрямую провайдеру. Без ключа кнопка «Совет ИИ» не работает.`;
+}
+
+async function loadAiModels(selected, force) {
+  const select = $("#setAiModel");
+  if (!select) return;
+  const provider = (window.__aiProvider || "deepseek");
+  const requestId = String(Number(select.dataset.catalogRequest || 0) + 1);
+  select.dataset.catalogRequest = requestId;
+  const isCurrent = () => select.isConnected && select.dataset.catalogRequest === requestId
+    && window.__aiProvider === provider;
+  const fallback = AI_FALLBACK_MODELS[provider] || [];
+  const hint = $("#setAiModelHint");
+  if (hint) hint.textContent = "Загружаю список моделей…";
+  try {
+    const query = `?provider=${encodeURIComponent(provider)}${force ? "&force=true" : ""}`;
+    const data = await api(`/api/ai/models${query}`);
+    if (!isCurrent()) return;
+    const models = (data.models || []).slice(0, 500);
+    if (!models.length) throw new Error("пусто");
+    select.innerHTML = models.map((m) =>
+      `<option value="${esc(m.id)}" ${m.id === selected ? "selected" : ""}>${esc(m.name || m.id)}</option>`).join("");
+    if (selected && !models.some((m) => m.id === selected)) {
+      select.insertAdjacentHTML("afterbegin", `<option value="${esc(selected)}" selected>${esc(selected)}</option>`);
+    }
+    if (hint) {
+      const current = models.find((m) => m.id === select.value);
+      const total = `Моделей в каталоге: ${models.length}.`;
+      const desc = current && current.description ? ` ${current.description}` : "";
+      hint.textContent = (data.warning ? `${data.warning} ` : "") + total + desc;
+    }
+  } catch (err) {
+    if (!isCurrent()) return;
+    if (hint) hint.textContent = "Каталог недоступен. Показаны известные модели.";
+    select.innerHTML = (fallback.length ? fallback : [selected].filter(Boolean))
+      .map((id) => `<option value="${esc(id)}" ${id === selected ? "selected" : ""}>${esc(id)}</option>`).join("");
+    if (!fallback.length) {
+      select.insertAdjacentHTML("afterbegin", `<option value="${esc(selected || "")}" selected>${esc(selected || "модель не выбрана")}</option>`);
+    }
+  }
+}
+
+function gpuListHint(gpus) {
+  if (!gpus || !Array.isArray(gpus.list) || !gpus.list.length) return "";
+  const names = gpus.list.map((name) => esc(name)).join(", ");
+  const discrete = gpus.discrete ? ` Дискретная: ${esc(gpus.discrete)}.` : "";
+  return `<br />Найдено видеокарт: ${names}.${discrete}`;
+}
+
+function ruPlural(count, one, few, many) {
+  const abs = Math.abs(Math.round(count)) % 100;
+  const tail = abs % 10;
+  if (abs > 10 && abs < 20) return many;
+  if (tail > 1 && tail < 5) return few;
+  if (tail === 1) return one;
+  return many;
+}
+
+function powerHint(limits) {
+  if (!limits) return "Приложение не займёт всю машину: число рендеров и потоков зависит от этого ползунка.";
+
+  const parts = [];
+  if (limits.render_workers) parts.push(`${limits.render_workers} ${ruPlural(limits.render_workers, "рендер", "рендера", "рендеров")}`);
+  if (limits.ffmpeg_threads) parts.push(`${limits.ffmpeg_threads} ${ruPlural(limits.ffmpeg_threads, "поток", "потока", "потоков")} ffmpeg`);
+  if (limits.whisper_threads) parts.push(`${limits.whisper_threads} ${ruPlural(limits.whisper_threads, "поток", "потока", "потоков")} распознавания`);
+  const cpu = limits.cpu ? ` из ${limits.cpu} ядер` : "";
+  return parts.length ? `Сейчас: ${parts.join(" · ")}${cpu}.` : "Лимиты применятся к следующей задаче.";
+}
+
+async function openAiAdvice(project) {
+  $("#modal").innerHTML = `
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel workbench advice-panel" role="dialog" aria-modal="true" aria-labelledby="adviceTitle">
+      <div class="modal-head">
+        <h3 id="adviceTitle">Совет ИИ</h3>
+        <button class="icon-btn" data-close aria-label="Закрыть">${ICONS.close}</button>
+      </div>
+      <div class="modal-body advice-body">
+        <div class="advice-loading" id="adviceBody"><span class="spinner"></span> Думаю над клипом…</div>
+        <div class="set-hint advice-hint">
+          Модель смотрит на субтитры клипа и тайминги. Хук, тайминг и разбивку
+          применяйте вручную — приложение ничего не меняет само.
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close>Закрыть</button>
+        <button class="btn-ghost" id="adviceCopy">Скопировать</button>
+      </div>
+    </div>`;
+  $("#modal").classList.remove("hidden");
+  const body = $("#adviceBody");
+  let text = "";
+  try {
+    const data = await api("/api/ai/advice", {
+      method: "POST",
+      body: JSON.stringify({ project_id: project.id }),
+    });
+    text = data.advice || "";
+    body.classList.remove("advice-loading");
+    body.innerHTML = text.split("\n").map((line) => `<p>${esc(line)}</p>`).join("");
+    body.insertAdjacentHTML("beforeend",
+      `<div class="set-hint">Модель: ${esc(data.model || "")} · ${esc(String(data.took || ""))} с</div>`);
+  } catch (err) {
+    const message = String(err.message || err);
+    body.classList.remove("advice-loading");
+    body.innerHTML = `<div class="error-box">${esc(message)}</div>`;
+    if (/ключ|настройк/i.test(message)) {
+      body.insertAdjacentHTML("afterbegin",
+        `<div class="set-hint">Откройте «Настройки → ИИ-помощник» и вставьте ключ DeepSeek (или выберите другого провайдера).</div>`);
+    }
+  }
+  const copy = $("#adviceCopy");
+  if (copy) copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Совет скопирован");
+    } catch (e) {
+      toast("Не удалось скопировать", "err");
+    }
+  });
+}
+
+const ASSISTANT = { open: false, history: [], booted: false, busy: false };
+
+function assistantEls() {
+  return { drawer: $("#assistant"), body: $("#assistantBody"), input: $("#assistantInput") };
+}
+
+function ensureAssistant() {
+  if ($("#assistant")) return;
+  const wrap = document.createElement("aside");
+  wrap.id = "assistant";
+  wrap.className = "assistant hidden";
+  wrap.innerHTML = `
+    <div class="assistant-head">
+      <div class="assistant-title">${ICONS.spark}<span>Помощник</span></div>
+      <div class="assistant-actions">
+        <button class="icon-btn" id="assistantClear" title="Очистить диалог">↺</button>
+        <button class="icon-btn" id="assistantClose" aria-label="Закрыть">${ICONS.close}</button>
+      </div>
+    </div>
+    <div class="assistant-body" id="assistantBody"></div>
+    <div class="assistant-suggest" id="assistantSuggest"></div>
+    <form class="assistant-form" id="assistantForm">
+      <textarea id="assistantInput" rows="1" maxlength="600"
+        placeholder="Спросите что угодно про приложение…"></textarea>
+      <button class="btn-primary" type="submit" id="assistantSend">Спросить</button>
+    </form>`;
+  document.body.appendChild(wrap);
+  $("#assistantClose").addEventListener("click", () => closeAssistant());
+  $("#assistantClear").addEventListener("click", () => {
+    ASSISTANT.history = [];
+    const { body } = assistantEls();
+    if (body) body.innerHTML = "";
+    assistantWelcome(true);
+  });
+  $("#assistantForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const { input } = assistantEls();
+    if (input) askAssistant(input.value);
+  });
+  $("#assistantInput").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey) {
+      ev.preventDefault();
+      askAssistant(ev.target.value);
+    }
+  });
+}
+
+function assistantMsg(role, text, extra) {
+  const { body } = assistantEls();
+  if (!body) return;
+  const item = document.createElement("div");
+  item.className = `assistant-msg ${role}`;
+  item.innerHTML = text.split("\n").map((line) => `<p>${esc(line)}</p>`).join("");
+  if (extra) item.insertAdjacentHTML("beforeend", `<div class="set-hint">${esc(extra)}</div>`);
+  body.appendChild(item);
+  body.scrollTop = body.scrollHeight;
+  return item;
+}
+
+async function assistantWelcome(silent) {
+  const { body } = assistantEls();
+  if (!body) return;
+  let data = null;
+  try {
+    const query = state.current ? `?project_id=${encodeURIComponent(state.current)}` : "";
+    data = await api(`/api/assistant${query}`);
+  } catch (e) {
+    data = { welcome: "Помощник недоступен — сервер не отвечает.", suggestions: [] };
+  }
+  ASSISTANT.booted = true;
+  body.innerHTML = "";
+  assistantMsg("bot", data.welcome || "");
+  const box = $("#assistantSuggest");
+  if (box) {
+    box.innerHTML = (data.suggestions || [])
+      .map((text) => `<button class="assistant-chip" type="button">${esc(text)}</button>`)
+      .join("");
+    $$(".assistant-chip", box).forEach((chip) => chip.addEventListener("click", () => {
+      askAssistant(chip.textContent);
+    }));
+  }
+  if (!silent) body.scrollTop = 0;
+}
+
+async function askAssistant(raw) {
+  const question = String(raw || "").trim();
+  if (!question || ASSISTANT.busy) return;
+  const { input } = assistantEls();
+  if (input) { input.value = ""; input.style.height = "auto"; }
+  ASSISTANT.busy = true;
+  assistantMsg("user", question);
+  const pending = assistantMsg("bot pending", "Думаю…");
+  try {
+    const data = await api("/api/assistant", {
+      method: "POST",
+      body: JSON.stringify({
+        message: question,
+        history: ASSISTANT.history.slice(-8),
+        project_id: state.current || null,
+      }),
+    });
+    pending.remove();
+    assistantMsg("bot", data.answer || "Пустой ответ.");
+    if (data.hint) assistantMsg("note", data.hint);
+    const steps = (data.steps || []).filter((step) => (step.actions || []).length);
+    if (steps.length > 1 || (steps.length === 1 && data.source === "ai")) {
+      const lines = [];
+      steps.forEach((step) => {
+        (step.actions || []).forEach((action) => {
+          lines.push(`${action.ok ? "✓" : "✗"} ${action.type}: ${String(action.message || "").slice(0, 90)}`);
+        });
+      });
+      if (lines.length) assistantMsg("note", "Шаги агента:\n" + lines.join("\n"));
+    }
+    await applyAssistantUI(data);
+    if (data.source === "local" && !data.hint) {
+      assistantMsg("note", "Отвечаю по встроенной инструкции: ключ ИИ не задан (настройки → ИИ-помощник).");
+    }
+    ASSISTANT.history.push({ role: "user", content: question });
+    ASSISTANT.history.push({ role: "assistant", content: String(data.answer || "").slice(0, 2000) });
+  } catch (e) {
+    pending.remove();
+    assistantMsg("bot", "Не получилось: " + String(e.message || e));
+  } finally {
+    ASSISTANT.busy = false;
+  }
+}
+
+async function applyAssistantUI(data) {
+  const ui = (data && data.ui) || {};
+  const actions = [...(data.actions || []), ...(data.steps || []).flatMap(step => step.actions || [])];
+  if (state.current && actions.some(a => a.ok && ["rerender_clip", "undo_clip"].includes(a.type))) {
+    await loadDetail(true);
+    schedulePoll(500);
+  }
+  // что-то изменилось на сервере — обновляем виджеты и список проектов
+  if (actions.some((a) => a.type === "set_settings")) {
+    try { pollSystem(); } catch (e) {}
+    try { await loadAiStatus(); } catch (e) {}
+  }
+  if (actions.some((a) => a.type === "start_cut")) {
+    try { await loadProjects(); } catch (e) {}
+    if (ui.open_project) return applyAssistantUI({ ui });
+  }
+  if (ui.ai_mode !== undefined) {
+    state.opts.aiMode = Boolean(ui.ai_mode);
+    if (ui.prompt) state.opts.aiPrompt = String(ui.prompt);
+    const toggle = $("#aiModeToggle");
+    if (toggle) toggle.checked = state.opts.aiMode;
+    const card = $("#aiModeCard");
+    if (card) card.classList.toggle("on", state.opts.aiMode);
+  }
+  if (ui.open_settings) {
+    try { await openSettings(); } catch (e) { console.error(e); }
+  }
+  if (ui.open_project) {
+    try {
+      await loadProjects();
+      openProject(ui.open_project);
+    } catch (e) { console.error(e); }
+  }
+}
+
+function openAssistant(silent) {
+  ensureAssistant();
+  const drawer = $("#assistant");
+  if (!drawer) return;
+  drawer.classList.remove("hidden");
+  ASSISTANT.open = true;
+  try { localStorage.setItem("vcAssistantSeen", "1"); } catch (e) {}
+  if (!ASSISTANT.booted) assistantWelcome(silent);
+  $("#assistantInput")?.focus();
+}
+
+function closeAssistant() {
+  const drawer = $("#assistant");
+  if (drawer) drawer.classList.add("hidden");
+  ASSISTANT.open = false;
+  try { localStorage.setItem("vcAssistantSeen", "1"); } catch (e) {}
+}
+
+async function openSettings() {
+  let conf = { encoder: "auto", download_dir: "", clips_dir: "", ask_folder: true,
+               hw_available: null, power: 50, cpu_limit: 100, gpu_preference: "auto",
+               ai_provider: "deepseek", ai_model: "", ai_key_set: false, ai: null,
+               agent_mode: false };
+  try { conf = await api("/api/settings"); } catch (e) { console.error(e); }
+  const modes = [["auto", "Авто"], ["gpu", "Видеокарта"], ["cpu", "Процессор"]];
+  $("#modal").innerHTML = `
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel workbench settings-panel" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+      <div class="modal-head">
+        <h3 id="settingsTitle">Настройки</h3>
+        <button class="icon-btn" data-close aria-label="Закрыть">${ICONS.close}</button>
+      </div>
+      <div class="modal-body settings-body">
+        <div class="form-card set-section">
+          <h4>Кодирование клипов</h4>
+          <div class="set-seg" id="setEncoder">
+            ${modes.map(([k, label]) => `<button data-val="${k}" class="${conf.encoder === k ? "active" : ""}">${label}</button>`).join("")}
+          </div>
+          <div class="set-hint">
+            Видеокарта ускоряет кодирование, когда доступен аппаратный кодировщик${conf.hw_available ? ` (${esc(conf.hw_available)})` : ""}.
+            ${gpuListHint(conf.gpus)}
+          </div>
+          <label class="set-label" for="setGpuPref">На какой видеокарте считать</label>
+          <div class="set-seg" id="setGpuPref">
+            ${[["auto", "Авто"], ["integrated", "Встроенная"], ["discrete", "Дискретная"]]
+              .map(([k, label]) => `<button data-val="${k}" class="${(conf.gpu_preference || "auto") === k ? "active" : ""}">${label}</button>`).join("")}
+          </div>
+          <div class="set-hint" id="setGpuHint">${gpuPreferenceHint(conf.gpu_preference || "auto")}</div>
+        </div>
+        <div class="form-card set-section power-section">
+          <h4>Мощность</h4>
+          <div class="power-row">
+            <input type="range" id="setPower" min="0" max="100" step="5"
+                   value="${Number(conf.power ?? 50)}" aria-label="Мощность обработки" />
+            <output id="setPowerValue" class="power-value">${powerLabel(conf.power ?? 50)}</output>
+          </div>
+          <div class="power-scale"><span>Экономно</span><span>Баланс</span><span>Максимум</span></div>
+          <div class="set-hint" id="setPowerHint">${powerHint(conf.limits)}</div>
+          <div class="power-row cpu-row">
+            <input type="range" id="setCpuLimit" min="25" max="100" step="5"
+                   value="${Number(conf.cpu_limit ?? 100)}" aria-label="Потолок загрузки процессора" />
+            <output id="setCpuLimitValue" class="power-value">${cpuLimitLabel(conf.cpu_limit ?? 100)}</output>
+          </div>
+          <div class="power-scale"><span>25%</span><span>50%</span><span>75%</span><span>100%</span></div>
+          <div class="set-hint" id="setCpuLimitHint">${cpuLimitHint(conf.cpu_limit ?? 100, conf.cpu_cap)}</div>
+        </div>
+        <div class="form-card set-section ai-section">
+          <div class="ai-settings-intro">
+            <div><h4>ИИ-помощник</h4><p class="set-hint">Выберите провайдера и сохраните один API-ключ.</p></div>
+            <div class="ai-settings-art" aria-hidden="true"><span>✦</span><i></i><b></b></div>
+          </div>
+          <div class="set-seg" id="setAiProvider">
+            ${aiProviderButtons(conf.ai_provider || "deepseek", conf.ai && conf.ai.providers)}
+          </div>
+          <div class="set-hint" id="setAiProviderHint">${aiProviderHint(conf)}</div>
+          <label class="set-label" for="setAiBase">Адрес API (для своей модели)</label>
+          <input type="text" id="setAiBase" class="set-input" spellcheck="false"
+                 placeholder="http://127.0.0.1:11434/v1" value="${esc(conf.ai && conf.ai.base ? conf.ai.base : "")}" />
+          <label class="set-label" for="setAiModel">Модель</label>
+          <div class="set-row">
+            <select id="setAiModel" class="set-select">
+              <option value="${esc(conf.ai_model || "")}">${esc(conf.ai_model || "Загрузка…")}</option>
+            </select>
+            <button class="btn-ghost" type="button" id="setAiRefresh" title="Обновить список моделей">Обновить</button>
+          </div>
+          <div class="set-hint" id="setAiModelHint"></div>
+          <label class="set-label" for="setAiKey" id="setAiKeyLabel">API-ключ</label>
+          <input type="password" id="setAiKey" class="set-input" autocomplete="off" spellcheck="false"
+                 placeholder="${conf.ai_key_set ? "ключ сохранён — оставьте пустым, чтобы не менять" : "вставьте ключ"}" />
+          <div class="set-hint" id="setAiKeyStatus" aria-live="polite"></div>
+          <div class="set-row">
+            <button class="btn-ghost" type="button" id="setLocalDetect">Найти локальный сервер</button>
+            <span class="set-hint" id="setLocalInfo"></span>
+          </div>
+          <label class="toggle agent-toggle"><input type="checkbox" id="setAgentMode" ${conf.agent_mode ? "checked" : ""}/><span class="track"></span><span><b>Агент-режим (бета)</b> — выполняет задание по шагам; включите, если хотите, чтобы агент сам доводил дело до конца</span></label>
+        </div>
+        <div class="form-card set-section paths-section">
+          <h4>Папки сохранения</h4>
+          <label for="setDownloadDir">Скачанные видео</label>
+          <div class="set-path">
+            <input type="text" id="setDownloadDir" placeholder="Спросить при первом сохранении" value="${esc(conf.download_dir || "")}" />
+            <button class="btn-ghost" type="button" id="setDownloadPick">Выбрать…</button>
+          </div>
+          <label for="setClipsDir">Готовые клипы</label>
+          <div class="set-path">
+            <input type="text" id="setClipsDir" placeholder="Загрузки/ViralCut" value="${esc(conf.clips_dir || "")}" />
+            <button class="btn-ghost" type="button" id="setClipsPick">Выбрать…</button>
+          </div>
+          <label class="toggle"><input type="checkbox" id="setAskFolder" ${conf.ask_folder ? "checked" : ""}/><span class="track"></span><span>Спрашивать папку при каждом сохранении</span></label>
+        </div>
+        <div class="form-card set-section">
+          <h4>Проверка загрузки</h4>
+          <div class="set-hint">Если видео не скачивается — проверьте ссылку: покажем, какие клиенты источника отвечают и какое качество отдают.</div>
+          <div class="set-row">
+            <input type="text" id="setCheckUrl" class="set-input" placeholder="https://youtube.com/watch?v=…" spellcheck="false" />
+            <button class="btn-ghost" type="button" id="setCheckRun">Проверить</button>
+          </div>
+          <pre id="setCheckOut" class="diag-out hidden"></pre>
+        </div>
+        <div class="form-card set-section">
+          <h4>Журнал приложения</h4>
+          <div class="settings-log">
+            <div class="set-hint">Показывает, на каком этапе произошла ошибка.</div>
+            <button class="btn-ghost" type="button" id="setDiag">Разобрать журнал</button>
+          </div>
+          <pre id="setDiagOut" class="diag-out hidden"></pre>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn-ghost" data-close>Отмена</button>
+        <button class="btn-primary" id="setSave">Сохранить</button>
+      </div>
+    </div>`;
+  $("#modal").classList.remove("hidden");
+  const diagBtn = $("#setDiag");
+  if (diagBtn) diagBtn.addEventListener("click", async () => {
+    const out = $("#setDiagOut");
+    diagBtn.disabled = true;
+    diagBtn.innerHTML = '<span class="spinner"></span> Читаю…';
+    try {
+      const data = await api("/api/diagnostics?tail=15");
+      if (out) {
+        out.textContent = data.report || "Пусто";
+        out.classList.remove("hidden");
+      }
+    } catch (err) {
+      toast(err.message, "err");
+    } finally {
+      diagBtn.disabled = false;
+      diagBtn.textContent = "Разобрать журнал";
+    }
+  });
+  const cpuInput = $("#setCpuLimit");
+  if (cpuInput) {
+    const syncCpu = () => {
+      const value = Number(cpuInput.value);
+      const label = $("#setCpuLimitValue");
+      if (label) label.textContent = cpuLimitLabel(value);
+      const hint = $("#setCpuLimitHint");
+      if (hint) hint.textContent = cpuLimitHint(value, conf.cpu_cap);
+    };
+    cpuInput.addEventListener("input", syncCpu);
+  }
+  window.__aiProviders = (conf.ai && conf.ai.providers) || null;
+  window.__aiProvider = conf.ai_provider || "deepseek";
+  let aiProvider = conf.ai_provider || "deepseek";
+  const syncAiKey = () => {
+    const provider = conf.ai?.providers?.find(p => p.key === aiProvider);
+    const input = $("#setAiKey");
+    const local = aiProvider === "local";
+    const saved = aiProvider === conf.ai_provider && conf.ai_key_set &&
+      $("#setAiBase").value.trim().replace(/\/+$/, "") === (conf.ai?.base || "");
+    $("#setAiKeyLabel").textContent = provider ? `API-ключ · ${provider.label}` : "API-ключ";
+    input.disabled = local;
+    input.placeholder = saved ? "Введите новый ключ для замены" : "Вставьте API-ключ";
+    $("#setAiKeyStatus").textContent = local ? "Для локальной модели ключ не нужен."
+      : saved ? "Ключ сохранён на этом компьютере."
+      : "При сохранении новый ключ заменит предыдущий.";
+  };
+  $("#setAiBase").addEventListener("input", syncAiKey);
+  syncAiKey();
+  $$("#setAiProvider button").forEach((b) => b.addEventListener("click", () => {
+    if (aiProvider === b.dataset.val) return;
+    $("#setAiKey").value = "";
+    aiProvider = b.dataset.val;
+    $("#setAiBase").value = aiProvider === conf.ai_provider ? (conf.ai?.base || "") : "";
+    syncAiKey();
+    window.__aiProvider = aiProvider;
+    $$("#setAiProvider button").forEach((x) => x.classList.toggle("active", x === b));
+    const hint = $("#setAiProviderHint");
+    if (hint) hint.textContent = aiProviderHint({ ...conf, ai_provider: aiProvider });
+    const modelSelect = $("#setAiModel");
+    if (modelSelect) modelSelect.innerHTML = `<option value="">Загрузка…</option>`;
+    loadAiModels("");
+  }));
+  loadAiModels(conf.ai_model || "");
+  $("#setAiModel")?.addEventListener("change", () => {
+    const hint = $("#setAiModelHint");
+    const option = $("#setAiModel")?.selectedOptions?.[0];
+    if (hint && option) hint.textContent = `Выбрано: ${option.textContent}`;
+  });
+  $("#setAiRefresh")?.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    loadAiModels($("#setAiModel")?.value || "", true);
+  });
+
+  let agentMode = Boolean(conf.agent_mode);
+  const agentToggle = $("#setAgentMode");
+  if (agentToggle) agentToggle.addEventListener("change", () => { agentMode = agentToggle.checked; });
+
+  $("#setLocalDetect")?.addEventListener("click", async (ev) => {
+    ev.preventDefault();
+    const info = $("#setLocalInfo");
+    if (info) info.textContent = "Ищу Ollama или LM Studio…";
+    try {
+      const found = await api("/api/ai/local");
+      if (!info) return;
+      if (found.available) {
+        info.textContent = `Найдено: ${found.models.slice(0, 4).join(", ")}`;
+        aiProvider = "local";
+        window.__aiProvider = "local";
+        const baseInput = $("#setAiBase");
+        if (baseInput) baseInput.value = found.base;
+        $("#setAiKey").value = "";
+        syncAiKey();
+        $$("#setAiProvider button").forEach((x) => x.classList.toggle("active", x.dataset.val === "local"));
+        const select = $("#setAiModel");
+        if (select) {
+          select.innerHTML = found.models.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join("");
+        }
+      } else {
+        info.textContent = "Локальный сервер не отвечает: запустите Ollama (11434) или LM Studio (1234).";
+      }
+    } catch (e) {
+      if (info) info.textContent = "Не удалось проверить локальный сервер.";
+    }
+  });
+
+  let gpuPreference = conf.gpu_preference || "auto";
+  $$("#setGpuPref button").forEach((b) => b.addEventListener("click", () => {
+    gpuPreference = b.dataset.val;
+    $$("#setGpuPref button").forEach((x) => x.classList.toggle("active", x === b));
+    const hint = $("#setGpuHint");
+    if (hint) hint.textContent = gpuPreferenceHint(gpuPreference);
+  }));
+
+  const powerInput = $("#setPower");
+  if (powerInput) {
+    const syncPower = () => {
+      const value = Number(powerInput.value);
+      const label = $("#setPowerValue");
+      if (label) label.textContent = powerLabel(value);
+      const hint = $("#setPowerHint");
+      if (hint) hint.textContent = powerHint(conf.limits) + (value > 0 ? "" : " Экономный режим: один рендер.");
+    };
+    powerInput.addEventListener("input", syncPower);
+  }
+  $("#setCheckRun")?.addEventListener("click", async () => {
+    const out = $("#setCheckOut");
+    const url = ($("#setCheckUrl")?.value || "").trim();
+    if (!url) { toast("Вставьте ссылку", "err"); return; }
+    if (out) { out.classList.remove("hidden"); out.textContent = "Проверяю источники…"; }
+    try {
+      const data = await api(`/api/download/check?url=${encodeURIComponent(url)}`);
+      const lines = [`yt-dlp: ${data.ytdlp} · POT: ${data.pot ? "есть" : "нет"} · запасной движок: ${data.binary && data.binary.present ? (data.binary.version || "есть") : "нет"}`];
+      (data.clients || []).forEach((item) => {
+        lines.push(`${item.ok ? "✓" : "✗"} ${item.client}: ` + (item.ok ? `${item.height}p` : item.error || "нет ответа"));
+      });
+      if (out) out.textContent = lines.join("\n");
+    } catch (e) {
+      if (out) out.textContent = "Ошибка: " + String(e.message || e);
+    }
+  });
+
+  $("#setDownloadPick").addEventListener("click", () => chooseFolder("download"));
+  $("#setClipsPick").addEventListener("click", () => chooseFolder("clips"));
+  let encoder = conf.encoder || "auto";
+  $$("#setEncoder button").forEach((b) => b.addEventListener("click", () => {
+    encoder = b.dataset.val;
+    $$("#setEncoder button").forEach((x) => x.classList.toggle("active", x === b));
+  }));
+  $("#setSave").addEventListener("click", async () => {
+    const btn = $("#setSave");
+    btn.disabled = true;
+    try {
+      const payload = {
+        encoder,
+        download_dir: $("#setDownloadDir").value.trim(),
+        clips_dir: $("#setClipsDir").value.trim(),
+        ask_folder: $("#setAskFolder").checked,
+        power: Number($("#setPower").value),
+        cpu_limit: Number($("#setCpuLimit").value),
+        gpu_preference: gpuPreference,
+        ai_provider: aiProvider,
+        ai_model: $("#setAiModel") ? $("#setAiModel").value : "",
+        ai_base: $("#setAiBase") ? $("#setAiBase").value.trim() : "",
+        agent_mode: agentMode,
+      };
+      // пустое поле = «не менять ключ», иначе сохранение стирало бы его
+      const aiKey = ($("#setAiKey")?.value || "").trim();
+      if (aiKey && aiProvider !== "local") payload.ai_key = aiKey;
+      const saved = await api("/api/settings", { method: "POST", body: JSON.stringify(payload) });
+      closeModal();
+      if (saved.encoder_warning) toast(saved.encoder_warning, "err");
+      else toast("Настройки сохранены");
+      pollSystem();
+    } catch (e) {
+      toast(e.message, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+function bindHud() {
+  const head = $("#sysToggle");
+  const card = $("#sysCard");
+  const dock = $("#hudDock");
+  if (!head || !card || !dock) return;
+  const setCollapsed = (collapsed) => {
+    card.classList.toggle("collapsed", collapsed);
+    head.setAttribute("aria-expanded", String(!collapsed));
+  };
+  try {
+    setCollapsed(localStorage.getItem("vcHudCollapsed") !== "0");
+  } catch (_) {}
+
+  // сохранённая позиция: пользователь мог перетащить панель
+  const placeHud = (x, y) => {
+    if (card.parentElement === dock) document.body.append(card);
+    const r = card.getBoundingClientRect();
+    const left = Math.min(Math.max(8, x), Math.max(8, window.innerWidth - r.width - 8));
+    const top = Math.min(Math.max(8, y), Math.max(8, window.innerHeight - r.height - 8));
+    card.style.left = `${left}px`;
+    card.style.top = `${top}px`;
+    card.style.right = "auto";
+    card.style.bottom = "auto";
+    return { left, top };
+  };
+  const saved = (() => {
+    try { return JSON.parse(localStorage.getItem("vcHudPos") || "null"); } catch (_) { return null; }
+  })();
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    const pos = placeHud(saved.x, saved.y);
+    try { localStorage.setItem("vcHudPos", JSON.stringify({ x: pos.left, y: pos.top })); } catch (_) {}
+  }
+  window.addEventListener("resize", () => {
+    const stored = (() => {
+      try { return JSON.parse(localStorage.getItem("vcHudPos") || "null"); } catch (_) { return null; }
+    })();
+    if (stored && Number.isFinite(stored.x)) placeHud(stored.x, stored.y);
+  });
+
+  let drag = null;
+  head.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0) return;
+    const r = card.getBoundingClientRect();
+    drag = { offX: e.clientX - r.left, offY: e.clientY - r.top, moved: false,
+             startX: e.clientX, startY: e.clientY };
+    card.classList.add("dragging");
+    try { head.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  head.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < 4) return;
+    const undocking = card.parentElement === dock;
+    drag.moved = true;
+    placeHud(e.clientX - drag.offX, e.clientY - drag.offY);
+    if (undocking) {
+      try { head.setPointerCapture(e.pointerId); } catch (_) {}
+    }
+  });
+  const finish = (e) => {
+    if (!drag) return;
+    const moved = drag.moved;
+    drag = null;
+    card.classList.remove("dragging");
+    try { head.releasePointerCapture(e.pointerId); } catch (_) {}
+    if (moved) {
+      const r = card.getBoundingClientRect();
+      try { localStorage.setItem("vcHudPos", JSON.stringify({ x: r.left, y: r.top })); } catch (_) {}
+      return;
+    }
+    toggleHud();
+  };
+  const toggleHud = () => {
+    setCollapsed(!card.classList.contains("collapsed"));
+    try {
+      localStorage.setItem("vcHudCollapsed", card.classList.contains("collapsed") ? "1" : "0");
+    } catch (_) {}
+  };
+  head.addEventListener("pointerup", finish);
+  head.addEventListener("pointercancel", finish);
+  head.addEventListener("click", (e) => { if (!e.detail) toggleHud(); });
+}
+
+/* ---------------- Окно стримера (камера) ---------------- */
+
+function manualClipHTML() {
+  return `
+    <div class="pip-card" id="manualCard">
+      <div class="pip-head">
+        <div>
+          <div class="pip-title">Добавить по таймкоду</div>
+          <div class="pip-sub">Свой момент, мимо алгоритма. Время в формате мм:сс или секунды.</div>
+        </div>
+      </div>
+      <div class="pip-controls">
+        <input type="text" id="mcStart" placeholder="00:00" style="width:90px;padding:8px 10px;border-radius:10px;border:1px solid var(--separator);background:var(--grouped-2);color:var(--text)" />
+        <span>—</span>
+        <input type="text" id="mcEnd" placeholder="00:45" style="width:90px;padding:8px 10px;border-radius:10px;border:1px solid var(--separator);background:var(--grouped-2);color:var(--text)" />
+        <label class="toggle"><input type="checkbox" id="mcTrim" checked/><span class="track"></span><span>Подрезать тишину</span></label>
+        <button class="btn-primary" id="mcAdd" type="button">Добавить клип</button>
+      </div>
+    </div>`;
+}
+
+function pipCardHTML(detail) {
+  const project = detail.project;
+  if (!project) return "";
+  const conf = (project.options && project.options.pip) || {};
+  const on = conf.enabled !== false;
+  const pos = conf.pos || [0.72, 0.78];
+  const corner = conf.cam_corner || "bottom-right";
+  const corners = [["top-left", "↖"], ["top-right", "↗"], ["bottom-left", "↙"], ["bottom-right", "↘"]];
+  const slots = [];
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) {
+      const x = col / 2;
+      const y = row / 2;
+      const active = Math.abs(pos[0] - x) < 0.04 && Math.abs(pos[1] - y) < 0.04;
+      slots.push(`<button class="pip-slot ${active ? "active" : ""}" data-x="${x}" data-y="${y}" type="button" aria-label="окно ${col},${row}"></button>`);
+    }
+  }
+  return `
+    <div class="pip-card" id="pipCard">
+      <div class="pip-head">
+        <div>
+          <div class="pip-title">Окно стримера</div>
+          <div class="pip-sub">Главным остаётся рабочее поле, а камера стримера — отдельным окном. Выберите, где она в кадре и куда поставить окно.</div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="pipToggle" ${on ? "checked" : ""}/><span class="track"></span></label>
+      </div>
+      <div class="pip-grid">
+        <div class="pip-block">
+          <div class="pip-label">Камера в кадре</div>
+          <div class="pip-corners" id="pipCamCorner">
+            ${corners.map(([key, icon]) => `<button class="pip-corner ${corner === key ? "active" : ""}" data-corner="${key}" type="button">${icon}</button>`).join("")}
+          </div>
+          <div class="pip-hint">В каком углу исходника сидит стример</div>
+        </div>
+        <div class="pip-block">
+          <div class="pip-label">Окно на клипе</div>
+          <div class="pip-slots" id="pipSlots">${slots.join("")}</div>
+          <div class="pip-hint">Куда его поставить: края или по центру</div>
+        </div>
+        <div class="pip-block">
+          <div class="pip-label">Размер окна</div>
+          <input type="range" id="pipSize" min="16" max="42" value="${Math.round((conf.size || 0.28) * 100)}"/>
+          <div class="pip-hint"><span id="pipSizeVal">${Math.round((conf.size || 0.28) * 100)}%</span> ширины клипа</div>
+        </div>
+      </div>
+      <div class="pip-controls">
+        <button class="btn-primary" id="pipApply" type="button">Применить</button>
+        <button class="btn-ghost" id="pipRebuild" type="button">Пересобрать с окном</button>
+      </div>
+    </div>`;
+}
+
+async function initPip(detail) {
+  const card = $("#pipCard");
+  if (!card || !detail || !detail.project) return;
+  const project = detail.project;
+  let conf = (project.options && project.options.pip) || {};
+  conf = {
+    enabled: conf.enabled !== false,
+    pos: conf.pos || [0.72, 0.78],
+    cam_corner: conf.cam_corner || "bottom-right",
+    size: conf.size || 0.28,
+    radius: conf.radius || 20,
+  };
+
+  async function savePip() {
+    try {
+      await api(`/api/projects/${project.id}/pip`, {
+        method: "POST",
+        body: JSON.stringify({
+          enabled: conf.enabled,
+          pos: conf.pos,
+          cam_corner: conf.cam_corner,
+          size: conf.size,
+          radius: conf.radius,
+        }),
+      });
+    } catch (e) { console.error("pip save", e); }
+  }
+
+  $("#pipToggle").checked = conf.enabled;
+  $("#pipToggle").addEventListener("change", () => { conf.enabled = $("#pipToggle").checked; savePip(); });
+
+  $("#pipCamCorner").addEventListener("click", (e) => {
+    const btn = e.target.closest(".pip-corner");
+    if (!btn) return;
+    conf.cam_corner = btn.dataset.corner;
+    $$("#pipCamCorner .pip-corner").forEach((b) => b.classList.toggle("active", b === btn));
+    savePip();
+  });
+
+  $("#pipSlots").addEventListener("click", (e) => {
+    const btn = e.target.closest(".pip-slot");
+    if (!btn) return;
+    conf.pos = [Number(btn.dataset.x), Number(btn.dataset.y)];
+    $$("#pipSlots .pip-slot").forEach((b) => b.classList.toggle("active", b === btn));
+    savePip();
+  });
+
+  $("#pipSize").addEventListener("input", (e) => {
+    conf.size = Number(e.target.value) / 100;
+    $("#pipSizeVal").textContent = `${e.target.value}%`;
+  });
+  $("#pipSize").addEventListener("change", savePip);
+
+  $("#pipApply").addEventListener("click", async () => { await savePip(); toast("Окно сохранено"); });
+  $("#pipRebuild").addEventListener("click", async () => {
+    await savePip();
+    try {
+      const res = await api(`/api/projects/${project.id}/pip/apply`, { method: "POST", body: JSON.stringify({}) });
+      toast(`Пересобираю клипов: ${res.clips}`);
+      poll();
+    } catch (e) { toast(e.message, "err"); }
+  });
+}
+
 function bindUpdateCard() {
   const card = $("#updateCard");
   if (!card) return;
@@ -2144,18 +3385,101 @@ window.addEventListener("hashchange", () => {
   }
 });
 
+/* ---------------- Надёжный старт ---------------- */
+
+function showFatal(message, details) {
+  const main = $("#main");
+  if (!main) return;
+  main.innerHTML = `
+    <div class="fatal-box">
+      <div class="fatal-title">Интерфейс не загрузился</div>
+      <p class="fatal-text">${esc(message)}</p>
+      ${details ? `<pre class="fatal-details">${esc(details)}</pre>` : ""}
+      <div class="fatal-actions">
+        <button class="btn-primary" id="fatalReload">Перезагрузить</button>
+        <button class="btn-ghost" id="fatalCopy">Скопировать ошибку</button>
+      </div>
+      <p class="fatal-hint">Если не помогает — закройте приложение и откройте заново. Файл лога: в папке данных ViralCut, app.log.</p>
+    </div>`;
+  const reload = $("#fatalReload");
+  if (reload) reload.addEventListener("click", () => location.reload());
+  const copy = $("#fatalCopy");
+  if (copy) copy.addEventListener("click", () => {
+    const text = `${message}\n${details || ""}`;
+    try { navigator.clipboard.writeText(text); toast("Ошибка скопирована"); }
+    catch (_) { toast("Не удалось скопировать", "err"); }
+  });
+}
+
+window.addEventListener("error", (event) => {
+  if (state.bootDone) return;
+  showFatal("Ошибка в скрипте приложения", String(event.message || event.error || ""));
+});
+window.addEventListener("unhandledrejection", (event) => {
+  if (state.bootDone) return;
+  showFatal("Не удалось загрузить данные", String((event.reason && event.reason.message) || event.reason || ""));
+});
+
+async function withRetry(fn, tries = 4, delay = 500) {
+  let lastError = null;
+  for (let i = 0; i < tries; i += 1) {
+    try { return await fn(); } catch (err) { lastError = err; await new Promise((r) => setTimeout(r, delay)); }
+  }
+  throw lastError;
+}
+
 (async function boot() {
-  bindUpdateCard();
-  checkUpdates();
-  setInterval(() => { if (document.visibilityState === "visible") checkUpdates(); }, 30 * 60 * 1000);
-  await checkHealth();
-  await loadFontCatalog();
-  await loadProjects();
-  const hash = location.hash.replace("#", "");
-  if (hash && state.projects.some((p) => p.id === hash)) {
-    openProject(hash);
-  } else {
-    renderMain(true);
+  // каждый шаг изолирован: падение одного не должно оставлять пустой экран
+  const watchdog = setTimeout(() => {
+    if (!state.bootDone) showFatal("Интерфейс не загрузился за 12 секунд",
+      "Сервер мог не ответить. Проверьте, что не блокирует антивирус/файрвол.");
+  }, 12000);
+
+  try { bindUpdateCard(); } catch (e) { console.error(e); }
+  try { $("#settingsBtn")?.addEventListener("click", openSettings); } catch (e) { console.error(e); }
+  try {
+    $("#helpBtn")?.addEventListener("click", () => (ASSISTANT.open ? closeAssistant() : openAssistant()));
+  } catch (e) { console.error(e); }
+  try { bindHud(); } catch (e) { console.error(e); }
+  try { pollSystem(); setInterval(pollSystem, 2000); } catch (e) { console.error(e); }
+  try { checkUpdates(); setInterval(() => { if (document.visibilityState === "visible") checkUpdates(); }, 30 * 60 * 1000); } catch (e) { console.error(e); }
+
+  try {
+    await withRetry(() => checkHealth(), 5, 700);
+  } catch (e) {
+    console.error(e);
+  }
+
+  try { await loadFontCatalog(); } catch (e) { console.error(e); }
+  try { await loadAiStatus(); } catch (e) { console.error(e); }
+  try {
+    // первый запуск: помощник сам рассказывает, что делать
+    if (localStorage.getItem("vcAssistantSeen") !== "1") {
+      setTimeout(() => openAssistant(true), 1200);
+    }
+  } catch (e) { console.error(e); }
+
+  try {
+    await withRetry(() => loadProjects(), 4, 600);
+  } catch (e) {
+    clearTimeout(watchdog);
+    showFatal("Не удалось получить список проектов", String((e && e.message) || e));
+    return;
+  }
+
+  state.bootDone = true;
+  clearTimeout(watchdog);
+
+  try {
+    const hash = location.hash.replace("#", "");
+    if (hash && state.projects.some((p) => p.id === hash)) {
+      openProject(hash);
+    } else {
+      renderMain(true);
+    }
+  } catch (e) {
+    console.error(e);
+    showFatal("Не удалось отрисовать экран", String((e && e.stack) || e));
   }
   setInterval(() => { if (document.visibilityState === "visible") checkHealth(); }, 20000);
 })();

@@ -219,6 +219,21 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
 - **Verification**:
   - `.\.venv-win\Scripts\python.exe -m unittest tests/test_custom_features.py` (all 36 tests pass).
 
+## Sync with Upstream v1.6.0 (`v1.4.4` -> `v1.6.0`)
+- **Goal**: Fast-forward `main` to `upstream/main` (`8fd2feb`, ViralCut `1.6.0`) and merge all upstream features (AI assistant & multi-step agent with undo, GPU/CPU resource limits & power slider, AMD AMF & discrete GPU preference, system load HUD, diagnostics/`faulthandler`, manual timecode clipping & pause cutting, multi-track audio selection, 2-window Whisper language probing & script mismatch guard, exact YouTube quality & HTTP 503 retries, 3 new Cyrillic fonts) with all custom fork features.
+- **Merged / adapted files**:
+  - `viralcut/db.py` & `viralcut/custom_cleanup.py`: adopted upstream `db.session()` context manager alongside `db.connect()`.
+  - `viralcut/transcribe.py`: merged `NoSpeechError`, `audio_track`/`window`, `_probe_language()`, and `_fix_language_mismatch()` (keeping `wav` cleanup in `finally:` after mismatch check) with `custom_whisper` model switcher and optimization presets.
+  - `viralcut/downloader.py`: merged `exact_quality`, `preferred_height`, `ytdlp_bin` fallback, and `ytdlp_ffmpeg_ready()` guard with `custom_downloader` format ranking (`target_lang`), section download (`meta_out` + `quality`), and `custom_debug` telemetry.
+  - `viralcut/pipeline.py`: merged `ai_mode`/`ai_prompt`/`autostart`/`cut_pauses`, `audio_track`, `restore` (agent undo), and `quality` tracking with `whisper_model`, `_whisper_lang()`, `meta_out`, and `rerender_section_clip()`.
+  - `viralcut/render.py`: merged `encoder_mode`, `attempts` staged temp-dir render, and `resources.ffmpeg_threads()`/`wrap_nice()` with `custom_debug` process telemetry via thread-local `_ENCODE_META` (preserving upstream `_run_encode` signature).
+  - `viralcut/main.py` & `viralcut/jobs.py`: merged upstream AI/assistant/agent/settings/diagnostics/system/audio routes and `_clip_gate`/`_agent_edits` with custom Whisper/debug/cleanup routes and `active_project_ids()`.
+  - `web/app.js` & `web/index.html`: merged AI mode, assistant, settings modal, HUD widget, and isolated `boot()` watchdog with `#vcWhisperSlot` (`vcWhisper`), `#vcSettingsBtn` (`vcSettings`), and `custom_debug` inspector.
+  - `tests/test_custom_features.py`: updated 3 mocks (`DbConnectTest`, `RenderFallbackTest`, `AuditFixesTest`, `CustomWhisperTest`) for v1.6.0 compatibility.
+  - `README.md` & `build_windows_lite.ps1`: updated base version to `1.6.0` and default Lite tag to `fork-v1.6.0-1`.
+- **Verification**:
+  - `python -m unittest tests.test_custom_features tests.test_render tests.test_ytdlp_ffmpeg.YtDlpSeesFfmpegTest.test_section_without_ffmpeg_raises_actionable_error -v` (48 tests pass).
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

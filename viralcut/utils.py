@@ -16,7 +16,13 @@ NO_WINDOW = 0x08000000 if sys.platform.startswith("win") else 0
 
 
 def subprocess_kwargs() -> Dict[str, Any]:
-    return {"creationflags": NO_WINDOW} if NO_WINDOW else {}
+    """Флаги запуска дочерних процессов (без окна на Windows + низкий приоритет)."""
+    from . import resources
+
+    kwargs = resources.subprocess_kwargs()
+    if NO_WINDOW and "creationflags" not in kwargs:
+        kwargs["creationflags"] = NO_WINDOW
+    return kwargs
 
 
 class MediaError(Exception):
@@ -24,11 +30,14 @@ class MediaError(Exception):
 
 
 def run(cmd: List[str], timeout: Optional[int] = None) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                          errors="replace", **subprocess_kwargs())
+    from . import resources
+
+    return subprocess.run(resources.wrap_nice(cmd), capture_output=True, text=True,
+                          timeout=timeout, errors="replace", **subprocess_kwargs())
 
 
 _TIME_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
+_AUDIO_STREAM_RE = re.compile(r"Stream #0:(\d+)(?:\[[^\]]+\])?(?:\(([a-z]{2,3})\))?: Audio: ([^,]+)")
 
 
 def _to_seconds(h: str, m: str, s: str) -> float:
@@ -51,6 +60,7 @@ def probe(path: Path) -> Dict[str, Any]:
     if fm:
         info["fps"] = float(fm.group(1))
     info["has_audio"] = "Audio:" in text
+    info["audio_tracks"] = len(_AUDIO_STREAM_RE.findall(text))
 
     # Поворот из метаданных (вертикальные видео с телефона)
     rm = re.search(r"rotation of (-?\d+(?:\.\d+)?) degrees", text)
@@ -62,6 +72,34 @@ def probe(path: Path) -> Dict[str, Any]:
     if info["width"] == 0 or info["height"] == 0:
         raise MediaError("Не удалось прочитать видеофайл (повреждён или это не видео).")
     return info
+
+
+def audio_tracks(path: Path) -> List[Dict[str, Any]]:
+    """Звуковые дорожки файла: порядок, язык, каналы — по выводу ffmpeg."""
+    try:
+        proc = run([ffmpeg(), "-hide_banner", "-i", str(path)], timeout=30)
+        text = (proc.stderr or "") + (proc.stdout or "")
+    except Exception:  # noqa: BLE001
+        return []
+    tracks: List[Dict[str, Any]] = []
+    order = 0
+    for line in text.splitlines():
+        m = _AUDIO_STREAM_RE.search(line)
+        if not m:
+            continue
+        title = ""
+        mt = re.search(r"\(title: ([^)]+)\)", line)
+        if mt:
+            title = mt.group(1).strip()
+        channels, stereo = 0, 1 if "stereo" in line else 2
+        mch = re.search(r"(\d+(?:\.\d+)?) (?:ch|stereo|mono)", line)
+        if mch:
+            channels = float(mch.group(1))
+        tracks.append({"index": order, "stream": int(m.group(1)),
+                       "language": (m.group(2) or "").lower(),
+                       "title": title, "channels": channels or 2})
+        order += 1
+    return tracks
 
 
 def media_duration(path: Path) -> float:
@@ -81,7 +119,9 @@ def extract_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     return dst
 
 
-def extract_asr_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
+def extract_asr_audio(src: Path, dst: Path, sample_rate: int = 16000, *,
+                      audio_track: Optional[int] = None,
+                      window: Optional[Tuple[float, float]] = None) -> Path:
     """Аудио для распознавания речи: без гула, шипения и перепадов громкости.
 
     Распознавание ошибается в первую очередь на «грязном» звуке: низкочастотный
@@ -90,8 +130,13 @@ def extract_asr_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     шумоподавление и выравнивание громкости по фразам.
     """
     dst.parent.mkdir(parents=True, exist_ok=True)
-    base = [ffmpeg(), "-y", "-v", "error", "-i", str(src), "-vn",
-            "-ac", "1", "-ar", str(sample_rate)]
+    base = [ffmpeg(), "-y", "-v", "error"]
+    if window is not None:
+        start, end = window
+        base += ["-ss", f"{start:.3f}", "-t", f"{end - start:.3f}"]
+    base += ["-i", str(src), "-vn", "-ac", "1", "-ar", str(sample_rate)]
+    if audio_track is not None:
+        base += ["-map", f"0:a:{audio_track}"]
     filters = "highpass=f=70,lowpass=f=7800,afftdn=nr=10:nf=-40,dynaudnorm=f=200:g=10"
     proc = run(base + ["-af", filters, "-c:a", "pcm_s16le", str(dst)])
     if proc.returncode != 0 or not dst.exists():
@@ -105,12 +150,60 @@ def extract_asr_audio(src: Path, dst: Path, sample_rate: int = 16000) -> Path:
     return dst
 
 
-def read_audio_mono(src: Path, sample_rate: int = 16000) -> Any:
+def iter_audio_mono(src: Path, sample_rate: int = 16000, *,
+                    audio_track: Optional[int] = None,
+                    block_seconds: float = 30.0) -> Any:
+    """Отдаёт аудио кусками по block_seconds секунд (float32 [-1, 1]).
+
+    Часовое видео целиком — это ~230 МБ float32 в памяти, а трёхчасовое уже
+    ~700 МБ: на машинах с 8 ГБ приложение вылетало на анализе. Потоковое
+    чтение держит в памяти один блок (~2 МБ) и не зависит от длины файла.
+    """
+    import numpy as np
+
+    cmd = [ffmpeg(), "-v", "error", "-i", str(src), "-vn", "-ac", "1",
+           "-ar", str(sample_rate), "-f", "s16le"]
+    if audio_track is not None:
+        cmd += ["-map", f"0:a:{audio_track}"]
+    cmd += ["-"]
+    block_bytes = max(2, int(block_seconds * sample_rate) * 2)
+    # выравниваем по кадру, чтобы блоки стыковались без «щелчка» на границе
+    block_bytes -= block_bytes % 4
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            **subprocess_kwargs())
+    try:
+        while True:
+            chunk = proc.stdout.read(block_bytes) if proc.stdout else b""
+            if not chunk:
+                break
+            if len(chunk) % 2:
+                chunk = chunk[:-1]  # неполный сэмпл: дочитаем со следующим блоком
+            yield np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+    finally:
+        try:
+            if proc.stdout:
+                proc.stdout.close()
+        finally:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+
+
+def read_audio_mono(src: Path, sample_rate: int = 16000, *,
+                    audio_track: Optional[int] = None) -> Any:
     """Возвращает numpy-массив float32 [-1, 1] с аудио."""
     import numpy as np
 
     cmd = [ffmpeg(), "-v", "error", "-i", str(src), "-vn", "-ac", "1",
-           "-ar", str(sample_rate), "-f", "s16le", "-"]
+           "-ar", str(sample_rate), "-f", "s16le"]
+    if audio_track is not None:
+        cmd += ["-map", f"0:a:{audio_track}"]
+    cmd += ["-"]
     proc = subprocess.run(cmd, capture_output=True, **subprocess_kwargs())
     if proc.returncode != 0 or not proc.stdout:
         raise MediaError("Не удалось прочитать аудио.")

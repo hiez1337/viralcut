@@ -49,7 +49,7 @@ def _dir_size(path: Path) -> int:
 def _active_project_ids() -> Set[str]:
     active: Set[str] = set(jobs.active_project_ids())
     try:
-        with db.connect() as conn:
+        with db.session() as conn:
             rows = conn.execute(
                 "SELECT id FROM projects WHERE status IN ('queued','preparing','running','processing')"
             ).fetchall()
@@ -70,7 +70,7 @@ def _active_project_ids() -> Set[str]:
 def _all_projects_map() -> Dict[str, Dict[str, Any]]:
     projects: Dict[str, Dict[str, Any]] = {}
     try:
-        with db.connect() as conn:
+        with db.session() as conn:
             rows = conn.execute("SELECT id, status, source, meta FROM projects").fetchall()
             for row in rows:
                 raw_meta = row["meta"]

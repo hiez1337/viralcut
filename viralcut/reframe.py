@@ -215,25 +215,43 @@ def _rdp(times: List[float], values: List[float], tolerance: float) -> List[int]
 
 
 def _simplify_path(times: List[float], xs: List[float], ys: List[float],
-                   max_points: int = 140) -> Tuple[List[float], List[float], List[float]]:
-    """Сжимает путь до допустимого числа keyframe.
+                   max_points: int = 60) -> Tuple[List[float], List[float], List[float]]:
+    """Сжимает путь до безопасного числа keyframe.
 
-    ffmpeg парсит выражение целиком: при ~200+ слагаемых он падает с
-    «Missing ')' or too many args», и рендер умирает. Дуглас–Пекер оставляет
-    только точки, без которых форма пути меняется заметнее допуска, поэтому
-    плавное движение описывается десятками точек, а не сотнями.
+    ffmpeg парсит выражение целиком: примерно после 2000 символов он падает с
+    «Missing ')' or too many args», и рендер умирает. Каждое слагаемое — около
+    26 символов, поэтому держим ≤60 точек (≈1.5 КБ). Дуглас–Пекер при этом
+    сохраняет форму с точностью в пару пикселей, а движение остаётся плавным:
+    между точками ffmpeg интерполирует линейно, а сама кривая уже сглажена.
     """
-    if len(times) <= 3:
+    n = len(times)
+    if n <= 3:
         return times, xs, ys
     tol = 0.6
-    for _ in range(6):
+    for _ in range(8):
         idx = sorted(set(_rdp(times, xs, tol)) | set(_rdp(times, ys, tol)))
         if len(idx) <= max_points:
             return [times[i] for i in idx], [xs[i] for i in idx], [ys[i] for i in idx]
-        tol *= 1.8
-    step = max(1, len(times) // max_points)
-    idx = list(range(0, len(times), step)) + [len(times) - 1]
+        tol *= 1.7
+    # даже грубый допуск не помог — равномерно прореживаем
+    step = max(1, (n - 1) // max(2, max_points - 1))
+    idx = list(range(0, n, step))
+    if idx[-1] != n - 1:
+        idx.append(n - 1)
     return [times[i] for i in idx], [xs[i] for i in idx], [ys[i] for i in idx]
+
+
+def _coarse_path(path: Dict[str, Any], max_points: int = 18) -> Dict[str, Any]:
+    """Аварийный вариант пути: редкие точки. Нужен, если ffmpeg всё же отказался."""
+    times = path["times"]
+    if len(times) <= max_points:
+        return path
+    step = max(1, math.ceil((len(times) - 1) / (max_points - 1)))
+    idx = list(range(0, len(times), step))[:max_points]
+    if idx[-1] != len(times) - 1:
+        idx[-1] = len(times) - 1
+    return {**path, "times": [times[i] for i in idx],
+            "x": [path["x"][i] for i in idx], "y": [path["y"][i] for i in idx]}
 
 
 def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16",
@@ -438,3 +456,62 @@ def crop_expressions(path: Dict[str, Any]) -> Tuple[str, str]:
     x_expr = _piecewise(times, path["x"], max_x, "t")
     y_expr = _piecewise(times, path["y"], max_y, "t")
     return x_expr, y_expr
+
+
+def remap_crop_path(path: Optional[Dict[str, Any]], segments: List[Dict[str, float]],
+                    clip_start: float) -> Optional[Dict[str, Any]]:
+    """Пересчитывает кривую кадрирования на время склеенного клипа.
+
+    `times` в кривой — секунды от начала окна клипа, а план склейки задан
+    абсолютными временами исходника. Точки, попавшие в вырезанные паузы,
+    выбрасываются, остальные сдвигаются на новое место. Без этого окно
+    кадрирования «опаздывало» бы ровно на длину вырезанных пауз.
+    """
+    if not path or not segments:
+        return path
+    times = [float(t) for t in path.get("times") or []]
+    xs = list(path.get("x") or [])
+    ys = list(path.get("y") or [])
+    if not times or len(xs) != len(times) or len(ys) != len(times):
+        return None
+
+    offsets: List[float] = []
+    total = 0.0
+    for seg in segments:
+        offsets.append(total)
+        total += seg["end"] - seg["start"]
+
+    out_t: List[float] = []
+    out_x: List[float] = []
+    out_y: List[float] = []
+    for t, x, y in zip(times, xs, ys):
+        absolute = clip_start + t
+        for seg, offset in zip(segments, offsets):
+            if seg["start"] - 1e-6 <= absolute <= seg["end"] + 1e-6:
+                new_t = offset + max(0.0, absolute - seg["start"])
+                if out_t and new_t - out_t[-1] < 1e-3:
+                    # две точки на одном месте: оставляем последнюю (она свежее)
+                    out_x[-1], out_y[-1] = x, y
+                    out_t[-1] = new_t
+                else:
+                    out_t.append(new_t)
+                    out_x.append(x)
+                    out_y.append(y)
+                break
+
+    if len(out_t) < 2:
+        return None
+    if out_t[0] > 1e-3:
+        out_t.insert(0, 0.0)
+        out_x.insert(0, out_x[0])
+        out_y.insert(0, out_y[0])
+    if total - out_t[-1] > 0.05:
+        out_t.append(total)
+        out_x.append(out_x[-1])
+        out_y.append(out_y[-1])
+
+    out = dict(path)
+    out["times"] = [round(v, 3) for v in out_t]
+    out["x"] = list(out_x)
+    out["y"] = list(out_y)
+    return out

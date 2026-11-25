@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import gc
 import os
+import re
 import shutil
 import sys
 import threading
@@ -61,6 +62,10 @@ ASR_PROMPT = os.environ.get("VIRALCUT_WHISPER_PROMPT", (
 
 
 class TranscriptionError(Exception):
+    pass
+
+
+class NoSpeechError(TranscriptionError):
     pass
 
 
@@ -140,6 +145,7 @@ def _get_model(
             try:
                 model_kwargs: Dict[str, Any] = {
                     "download_root": str(MODELS_DIR),
+                    "num_workers": 1,
                 }
                 if device == "cpu":
                     model_kwargs["cpu_threads"] = custom_whisper.get_effective_cpu_threads()
@@ -152,6 +158,7 @@ def _get_model(
                     )
                 except TypeError:
                     model_kwargs.pop("cpu_threads", None)
+                    model_kwargs.pop("num_workers", None)
                     model = WhisperModel(
                         model_ref,
                         device=device,
@@ -312,6 +319,127 @@ def _transcribe_span(model, path: Path, language: Optional[str], offset: float,
         return _consume(model, path, language, False, offset, total_duration, on_progress, batched)
 
 
+_PROBE_SECONDS = 60.0
+_PROBE_MIN_PROBABILITY = 0.55
+# Языки с кириллицей: если Whisper «увидел» английский, а текст кириллический,
+# значит язык определён неверно — перераспознаём на русском.
+_CYRILLIC_LANGS = ("ru", "uk", "be", "kk", "bg", "sr", "mk")
+_CYR_RE = re.compile(r"[А-Яа-яЁё]")
+_LAT_RE = re.compile(r"[A-Za-z]")
+
+
+def _probe_windows(duration: float) -> List[Tuple[float, float]]:
+    """Окна для определения языка: начало и середина записи.
+
+    Одно окно может попасть на музыку или тишину — поэтому берём два и
+    складываем вероятности: так интро не перевешивает всю запись.
+    """
+    if duration <= _PROBE_SECONDS * 1.5:
+        return [(0.0, duration)]
+    first = min(60.0, duration * 0.15)
+    second_start = min(max(0.0, duration * 0.55), duration - _PROBE_SECONDS)
+    return [(first, first + _PROBE_SECONDS), (second_start, second_start + _PROBE_SECONDS)]
+
+
+def _probe_language(model, wav: Path, duration: float,
+                    workdir: Path) -> Optional[Tuple[str, float]]:
+    """Определяет язык по фрагментам с речью, а не по первым 30 секундам.
+
+    Whisper смотрит на начало записи: если там музыка, интро или тишина, язык
+    может «уехать» в английский. Здесь язык голосуется по двум окнам, а
+    основной проход потом идёт уже с явным языком.
+    """
+    if duration < 2.0 or not wav.exists():
+        return None
+    totals: Dict[str, float] = {}
+    votes = 0
+    for index, (start, end) in enumerate(_probe_windows(duration)):
+        span = max(0.0, min(end, duration) - start)
+        if span < 2.0:
+            continue
+        clip = workdir / f"probe_{index}_{int(start)}_{os.urandom(2).hex()}.wav"
+        try:
+            if not _cut_window(wav, clip, start, start + span):
+                continue
+            _segments, info = _decode(model, clip, None, True, beam=1,
+                                      temperature=[0.0], condition=False)
+            lang = getattr(info, "language", None)
+            probability = float(getattr(info, "language_probability", 0.0) or 0.0)
+            if lang:
+                totals[str(lang)] = totals.get(str(lang), 0.0) + probability
+                votes += 1
+        except Exception:  # noqa: BLE001 — проба не должна ломать распознавание
+            continue
+        finally:
+            try:
+                clip.unlink(missing_ok=True)
+            except OSError:
+                pass
+    if not totals:
+        return None
+    best = max(totals.items(), key=lambda item: item[1])
+    score = best[1] / votes
+    if score < _PROBE_MIN_PROBABILITY:
+        return None
+    return best[0], round(score, 3)
+
+
+def _script_counts(text: str) -> Tuple[int, int]:
+    return len(_CYR_RE.findall(text or "")), len(_LAT_RE.findall(text or ""))
+
+
+def _expected_script(language: str) -> str:
+    code = (language or "").lower()[:2]
+    if code in _CYRILLIC_LANGS:
+        return "cyr"
+    if code == "en":
+        return "lat"
+    return ""
+
+
+def subtitle_script_mismatch(segments: List[Dict[str, Any]], language: str) -> bool:
+    cyr, lat = _script_counts(" ".join(str(seg.get("text") or "") for seg in segments))
+    total = cyr + lat
+    expected = _expected_script(language)
+    return total >= 20 and (
+        (expected == "cyr" and cyr < 0.35 * total) or
+        (expected == "lat" and lat < 0.35 * total)
+    )
+
+
+def _fix_language_mismatch(model, wav: Path, workdir: Path, segments: List[Dict[str, Any]],
+                           detected: Optional[str], on_progress: ProgressCb,
+                           probe: Optional[str] = None
+                           ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """При несовпадении письменности повторяет расшифровку на языке аудио."""
+    target = (probe or detected or "").strip()
+    if not subtitle_script_mismatch(segments, target):
+        return segments, detected
+    if on_progress:
+        on_progress(0.997, f"Проверка языка · повторно на «{target}»")
+    print(f"[whisper] текст не на языке {target!r} — перераспознаю на {target!r}",
+          file=sys.stderr, flush=True)
+    duration = max(0.5, float(segments[-1].get("end") or 0.0))
+    try:
+        fresh, _info = _transcribe_span(model, wav, target, 0.0, duration, None, False)
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+        return segments, detected
+    if not fresh:
+        return segments, detected
+    new_text = " ".join(str(seg.get("text") or "") for seg in fresh)
+    new_cyr, new_lat = _script_counts(new_text)
+    new_total = new_cyr + new_lat
+    if new_total < 20:
+        return segments, detected
+    good = (new_cyr if _expected_script(target) == "cyr" else new_lat) / new_total
+    if good < 0.6:
+        return segments, detected
+    print(f"[whisper] язык исправлен: {detected!r} → {target!r} "
+          f"(правильный алфавит {good:.0%})", file=sys.stderr, flush=True)
+    return fresh, target
+
+
 def _cut_window(src: Path, dst: Path, start: float, end: float) -> bool:
     """Вырезает фрагмент аудио для повторной проверки."""
     cmd = [ffmpeg(), "-y", "-v", "error", "-ss", f"{max(0.0, start):.3f}",
@@ -421,7 +549,9 @@ def _split_audio(wav: Path, workdir: Path, chunk_seconds: int) -> tuple[List[tup
 
 
 def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
-               on_progress: ProgressCb = None, model_name: Optional[str] = None) -> Dict[str, Any]:
+               on_progress: ProgressCb = None, model_name: Optional[str] = None,
+               *, audio_track: Optional[int] = None,
+               window: Optional[tuple[float, float]] = None) -> Dict[str, Any]:
     from . import custom_whisper
 
     target_model = (
@@ -437,13 +567,14 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
     except utils.MediaError:
         info = {"duration": utils.media_duration(media), "has_audio": True,
                 "width": 0, "height": 0}
-    duration = info["duration"]
+    duration = window[1] - window[0] if window is not None else info["duration"]
 
     if not info["has_audio"]:
         raise TranscriptionError("В видео нет аудиодорожки — нарезки с субтитрами невозможны.")
 
     # Чистим звук: убираем низкочастотный гул и шипение, выравниваем громкость.
-    wav = utils.extract_asr_audio(media, workdir / "audio16k.wav")
+    wav = utils.extract_asr_audio(media, workdir / "audio16k.wav",
+                                  audio_track=audio_track, window=window)
     chunks_folder: Optional[Path] = None
     try:
         chunk_seconds = max(120, int(os.environ.get("VIRALCUT_WHISPER_CHUNK", "600")))
@@ -466,6 +597,16 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
         out: List[Dict[str, Any]] = []
         detected_language = language
         language_probability = None
+        probe_language: Optional[str] = None
+        if language is None:
+            # Сначала определяем язык по фрагменту с речью и дальше декодируем уже
+            # с явным языком: так интро с музыкой не уводит субтитры в английский.
+            probe = _probe_language(model, wav, duration, workdir)
+            if probe and probe[1] >= _PROBE_MIN_PROBABILITY:
+                detected_language, language_probability = probe
+                probe_language = detected_language
+                print(f"[whisper] язык: {detected_language} ({language_probability:.2f}) "
+                      f"— по фрагментам с речью", file=sys.stderr, flush=True)
         for index, (path, offset, length) in enumerate(spans):
             if not path.exists():
                 traceback.print_exc()
@@ -508,7 +649,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                             f"Распознавание речи · часть {index + 1} из {len(spans)}")
 
         if not out:
-            raise TranscriptionError("Речь не распознана: возможно, в видео нет голоса.")
+            raise NoSpeechError("Речь не распознана: возможно, в видео нет голоса.")
 
         # Второй проход по спорным местам — только когда аудио не разрезано на части.
         fixed = 0
@@ -522,6 +663,15 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                 raise
             except Exception:  # noqa: BLE001
                 traceback.print_exc()
+
+        expected_language = language or probe_language
+        if not expected_language and (language_probability or 0.0) >= _PROBE_MIN_PROBABILITY:
+            expected_language = detected_language
+        if expected_language and len(spans) == 1:
+            out, detected_language = _fix_language_mismatch(
+                model, wav, workdir, out, detected_language, on_progress, expected_language)
+        if expected_language and subtitle_script_mismatch(out, expected_language):
+            raise TranscriptionError("Текст субтитров не совпал с языком речи. Проверьте выбранную аудиодорожку.")
     finally:
         if chunks_folder is not None:
             shutil.rmtree(chunks_folder, ignore_errors=True)
@@ -531,6 +681,8 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
             pass
 
     out.sort(key=lambda s: s["start"])
+    print(f"[whisper] итоговый язык: {detected_language or '?'} "
+          f"| сегментов: {len(out)}", file=sys.stderr, flush=True)
     logprobs = [s.get("quality", {}).get("avg_logprob", 0.0) for s in out]
     weak = sum(1 for value in logprobs if value < WEAK_LOGPROB)
     confidence = round(sum(logprobs) / len(logprobs), 3) if logprobs else 0.0

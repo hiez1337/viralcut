@@ -1,8 +1,8 @@
 ﻿# Сборка лёгкого релиза ViralCut (Windows 10/11 x64) без CUDA DLL и вшитых моделей.
 # Запуск: powershell -ExecutionPolicy Bypass -File build_windows_lite.ps1 -Tag fork-v1.4.1-1 -Version 1.4.1-fork.1
 param(
-    [string]$Tag = "fork-v1.4.3-3",
-    [string]$Version = "1.4.3-fork.3"
+    [string]$Tag = "fork-v1.6.0-1",
+    [string]$Version = "1.6.0-fork.1"
 )
 
 $ErrorActionPreference = "Stop"

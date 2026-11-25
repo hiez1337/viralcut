@@ -201,3 +201,101 @@ class SrtExportTest(unittest.TestCase):
         self.assertIn(" --> ", srt)
         self.assertIn("00:00:00,000 --> 00:00:01,000", srt)
         self.assertEqual(srt.count(" --> "), 2)
+
+
+class AdFilterTest(unittest.TestCase):
+    """Спонсорские вставки не должны становиться клипами."""
+
+    SENTENCES = [
+        "Почему большинство запусков проваливаются?",
+        "Потому что команда строит продукт для себя.",
+        "Мы собрали двадцать три интервью и поняли простую вещь.",
+        "Этот выпуск спонсируется сервисом Промошина.",
+        "Переходите по ссылке в описании и вводите промокод ЗАПУСК.",
+        "Скидка двадцать процентов на первый месяц.",
+        "Теперь вернёмся к продукту.",
+        "Людям нужен результат, а не список функций.",
+        "Поэтому мы переписали первый экран трижды.",
+        "Конверсия выросла с четырёх процентов до девятнадцати.",
+    ]
+
+    def _clips(self, **kwargs):
+        raw = make_segment(self.SENTENCES)
+        with mock.patch.object(analyze, "energy_curve", return_value=([], -30.0)):
+            return analyze.find_segments(raw, Path("dummy.mp4"), raw[0]["end"] + 1,
+                                         count=5, min_dur=8, max_dur=40, target_dur=18, **kwargs)
+
+    def test_detects_sponsor_block(self):
+        sents = analyze.build_sentences(make_segment(self.SENTENCES))
+        blocks = analyze.detect_ads(sents)
+        self.assertTrue(blocks, "спонсорский блок не найден")
+        self.assertIn("промокод", sents[blocks[0]["from"]]["text"].lower() + "".join(
+            s["text"].lower() for s in sents[blocks[0]["from"]:blocks[0]["to"] + 1]))
+
+    def test_no_clip_inside_ads(self):
+        sents = analyze.build_sentences(make_segment(self.SENTENCES))
+        blocks = analyze.detect_ads(sents)
+        clips = self._clips()
+        self.assertTrue(clips, "без рекламных клипов должно остаться что-то ещё")
+        for clip in clips:
+            overlap = analyze._ad_overlap(clip["start"], clip["end"], blocks)
+            self.assertLess(overlap, clip["duration"] * 0.3,
+                            f"клип на {overlap:.1f} с рекламы: {clip['title']}")
+
+    def test_normal_speech_not_flagged(self):
+        sents = analyze.build_sentences(make_segment([
+            "Мы выросли в десять раз за месяц.",
+            "Это дало нам десять тысяч пользователей.",
+            "Никто не ожидал такого результата.",
+        ]))
+        self.assertEqual(analyze.detect_ads(sents), [])
+
+
+class SilenceGapsTest(unittest.TestCase):
+    def test_finds_long_pauses_only(self):
+        from viralcut import analyze
+
+        hop = 0.25
+        curve = [-30.0] * 80
+        for i in range(8, 16):      # 2 секунды тишины
+            curve[i] = -55.0
+        for i in range(20, 22):     # 0.5 с — ниже порога по длине
+            curve[i] = -55.0
+        gaps = analyze.silence_gaps(curve, -30.0, 0.0, 20.0, hop=hop)
+        self.assertEqual(len(gaps), 2)
+        self.assertAlmostEqual(gaps[0]["start"], 2.0, places=1)
+        self.assertAlmostEqual(gaps[0]["length"], 2.0, places=1)
+
+
+class CutPlanTest(unittest.TestCase):
+    def test_removes_pause(self):
+        from viralcut import analyze
+
+        gaps = [{"start": 8.0, "end": 10.0, "length": 2.0}]
+        spans = analyze.cut_plan(0.0, 20.0, gaps)
+        self.assertEqual(len(spans), 2)
+        self.assertAlmostEqual(spans[0]["end"], 8.12, places=2)
+        self.assertAlmostEqual(spans[1]["start"], 9.88, places=2)
+        self.assertAlmostEqual(spans[1]["output"], 8.12, places=2)
+        total = sum(s["end"] - s["start"] for s in spans)
+        self.assertAlmostEqual(total, 18.24, places=2)
+
+    def test_words_shift_to_output_time(self):
+        from viralcut import analyze
+
+        spans = analyze.cut_plan(0.0, 20.0, [{"start": 8.0, "end": 10.0, "length": 2.0}])
+        words = [{"text": "до", "start": 2.0, "end": 2.5},
+                 {"text": "в паузе", "start": 9.0, "end": 9.4},
+                 {"text": "после", "start": 14.0, "end": 14.5}]
+        moved = analyze.remap_words(words, spans)
+        self.assertEqual([w["text"] for w in moved], ["до", "после"])
+        self.assertAlmostEqual(moved[0]["start"], 2.0, places=2)
+        self.assertAlmostEqual(moved[1]["start"], 12.24, places=2)
+        self.assertAlmostEqual(moved[1]["end"], 12.74, places=2)
+
+    def test_empty_gaps_keeps_window(self):
+        from viralcut import analyze
+
+        spans = analyze.cut_plan(5.0, 25.0, [])
+        self.assertEqual(len(spans), 1)
+        self.assertAlmostEqual(spans[0]["end"] - spans[0]["start"], 20.0, places=2)

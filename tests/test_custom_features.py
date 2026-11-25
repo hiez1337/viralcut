@@ -319,7 +319,7 @@ class DbConnectTest(unittest.TestCase):
             db_path = Path(tmp) / "test.db"
             with mock.patch.object(db, "DB_PATH", db_path):
                 db.init_db()
-                with db.connect() as conn:
+                with db.session() as conn:
                     conn.execute("SELECT 1").fetchone()
                 with self.assertRaises(sqlite3.ProgrammingError):
                     conn.execute("SELECT 1")
@@ -333,11 +333,12 @@ class RenderFallbackTest(unittest.TestCase):
             src.write_bytes(b"0" * 4096)
             calls = []
 
-            def fake_run_encode(cmd, duration, on_progress, *, label="", encoder="", source_res="", target_res=""):
-                calls.append((encoder, list(cmd)))
+            def fake_run_encode(cmd, duration, on_progress):
+                meta = getattr(render._ENCODE_META, "meta", None) or {}
+                calls.append((meta.get("encoder", ""), list(cmd)))
                 if len(calls) == 1:
                     return 1, ["nvenc init error"], None
-                out.write_bytes(b"x" * 16384)
+                Path(cmd[-1]).write_bytes(b"x" * 16384)
                 return 0, [], None
 
             with mock.patch.object(render, "probe", return_value={"duration": 5.0, "width": 1920, "height": 1080, "fps": 30.0, "has_audio": False}), \
@@ -350,7 +351,8 @@ class RenderFallbackTest(unittest.TestCase):
             self.assertEqual([c[0] for c in calls], ["h264_nvenc", "libx264"])
             fallback_cmd = calls[1][1]
             self.assertIn("libx264", fallback_cmd)
-            self.assertEqual(fallback_cmd[-6:], ["-r", "30", "-movflags", "+faststart", "-shortest", str(out)])
+            self.assertEqual(fallback_cmd[-6:-1], ["-r", "30", "-movflags", "+faststart", "-shortest"])
+            self.assertEqual(Path(fallback_cmd[-1]).name, out.name)
 
     def test_run_encode_drains_large_stdout_and_unregisters_debug_process(self):
         script = "import sys; sys.stdout.write('x=1\\n'*500 + 'out_time_us=2500000\\n'); sys.stdout.flush()"
@@ -438,7 +440,7 @@ class AuditFixesTest(unittest.TestCase):
             media.write_bytes(b"0" * 2048)
             wav = workdir / "audio16k.wav"
 
-            def make_wav(_src, dst, sample_rate=16000):
+            def make_wav(_src, dst, sample_rate=16000, **_kwargs):
                 dst.write_bytes(b"RIFF" + b"0" * 100)
                 return dst
 
@@ -669,14 +671,16 @@ class CustomWhisperTest(unittest.TestCase):
                 self.assertEqual(ctx.exception.status_code, 409)
 
     def test_transcribe_get_model_switches_cached_slot_on_model_change(self):
-        import faster_whisper
+        import types
 
         created = []
 
         class FakeModel:
-            def __init__(self, ref, device="cpu", compute_type="int8", download_root=None):
+            def __init__(self, ref, device="cpu", compute_type="int8", download_root=None, **_kwargs):
                 self.ref = ref
                 created.append(ref)
+
+        fake_fw = types.SimpleNamespace(WhisperModel=FakeModel)
 
         with tempfile.TemporaryDirectory() as tmp:
             models_dir = Path(tmp)
@@ -691,7 +695,7 @@ class CustomWhisperTest(unittest.TestCase):
                      mock.patch.object(transcribe, "MODELS_DIR", models_dir), \
                      mock.patch.object(transcribe, "WHISPER_LOCAL_DIR", ""), \
                      mock.patch.object(custom_whisper, "whisper_candidates", return_value=[("cpu", "int8")]), \
-                     mock.patch.object(faster_whisper, "WhisperModel", FakeModel):
+                     mock.patch.dict(sys.modules, {"faster_whisper": fake_fw}):
                     m1 = transcribe._get_model(model_name="small")
                     m2 = transcribe._get_model(model_name="small")
                     self.assertIs(m1, m2)
