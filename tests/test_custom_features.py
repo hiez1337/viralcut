@@ -848,6 +848,28 @@ class WhisperOptimizationSettingsTest(unittest.TestCase):
                 # First candidate must be cpu / int8
                 self.assertEqual(candidates[0], ("cpu", "int8"))
 
+    def test_recheck_limit_zero_not_overwritten_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                custom_whisper.set_whisper_settings({"preset": "ultra_fast_gpu"})
+                self.assertEqual(custom_whisper.get_effective_recheck_limit(), 0)
+
+
+class MergeRegressionFixesTest(unittest.TestCase):
+    def test_main_has_traceback_imported(self):
+        self.assertTrue(hasattr(main, "traceback"))
+
+    def test_run_encode_kills_process_when_on_progress_cancels(self):
+        from viralcut.errors import Cancelled
+
+        script = "import sys, time; sys.stdout.write('out_time_us=1000000\\n'); sys.stdout.flush(); time.sleep(10)"
+
+        def cancel_cb(_prog):
+            raise Cancelled("stop")
+
+        with self.assertRaises(Cancelled):
+            render._run_encode([sys.executable, "-c", script], 5.0, cancel_cb)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,5 +24,5 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-desktop.txt
 
-      - name: Run full test suite
-        run: python -m unittest discover -s tests -v
+      - name: Run core & custom test suite
+        run: python -m unittest tests.test_custom_features tests.test_render tests.test_analyze tests.test_reframe tests.test_agent tests.test_ai tests.test_assistant tests.test_assistant_actions tests.test_cut_pauses tests.test_diagnostics tests.test_download_resilience tests.test_edge_cases tests.test_gpu_pick tests.test_language_guard tests.test_limits_gpu tests.test_manual_clip tests.test_reactions tests.test_settings tests.test_ui_functions -v

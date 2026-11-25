@@ -1007,7 +1007,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         from . import live
         # старые live-клипы хранили слова относительно окна эфира
         words = live._absolute_words(words, float(clip["start"]))
-    elif clip.get("path") or "audio_track" in payload:
+    elif not settings.get("segments") and project.get("source") and (clip.get("path") or "audio_track" in payload):
         source = Path(project["source"])
         track_count = utils.probe(source)["audio_tracks"]
         track = payload.get("audio_track", opts["audio_track"])
@@ -1022,7 +1022,8 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
             with tempfile.TemporaryDirectory(prefix=".asr-", dir=workdir) as scratch:
                 try:
                     transcript = transcribe.transcribe(
-                        source, Path(scratch), language=opts["language"] or None,
+                        source, Path(scratch), language=_whisper_lang(opts),
+                        model_name=opts.get("whisper_model") or None,
                         audio_track=track, window=(start, end),
                     )
                 except transcribe.NoSpeechError:

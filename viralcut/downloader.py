@@ -456,7 +456,8 @@ def _retry_503(action: Callable[[], Any], quality: int, progress: ProgressCb):
 
 
 def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
-                            browser: Optional[str], progress: ProgressCb) -> Dict[str, Any]:
+                            browser: Optional[str], progress: ProgressCb,
+                            language: Optional[str] = None) -> Dict[str, Any]:
     pot = _pot_enabled()
     # У Shorts нужная ступень указана шириной. В обоих случаях ограничиваем
     # вторую сторону снизу, чтобы выбрать разрешение по короткой стороне.
@@ -475,7 +476,7 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
         matching = [f for f in info.get("formats") or []
                     if (f.get("vcodec") or "none") == "none" or _resolution(f) == quality]
         if any((f.get("vcodec") or "none") != "none" for f in matching):
-            fmt, _ = _pick_format({"formats": matching}, quality)
+            fmt, _ = _pick_format({"formats": matching}, quality, language=language)
             has_audio = "+" in fmt or any(
                 str(f.get("format_id")) == fmt and (f.get("acodec") or "none") != "none"
                 for f in matching
@@ -545,7 +546,7 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     if is_youtube(url) and (force_hd or exact_quality) and max_height in YOUTUBE_QUALITIES:
-        return _download_exact_youtube(url, dest_dir, max_height, browser, progress)
+        return _download_exact_youtube(url, dest_dir, max_height, browser, progress, language=language)
 
     if max_height <= 360:
         hd_format = FORMAT_SD
@@ -672,6 +673,8 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
             print(f"download ok (запасной движок): height={meta.get('height')}",
                   file=sys.stderr)
             return meta
+    except Cancelled:
+        raise
     except Exception as exc:  # noqa: BLE001
         print(f"[ytdlp-bin] не помог: {str(exc)[:200]}", file=sys.stderr)
 

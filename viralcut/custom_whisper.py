@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .errors import Cancelled
+
 DEFAULT_WHISPER_MODEL = "small"
 
 SELECTABLE_MODEL_IDS: Tuple[str, ...] = ("small", "medium", "large-v3")
@@ -839,7 +841,8 @@ def get_effective_recheck_limit(default_limit: int = 8) -> int:
     if _RUNTIME_SETTINGS is None:
         _RUNTIME_SETTINGS = _load_saved_settings()
 
-    return int(_RUNTIME_SETTINGS.get("recheck_limit") or 4)
+    val = _RUNTIME_SETTINGS.get("recheck_limit")
+    return 4 if val is None else int(val)
 
 
 def whisper_candidates(
@@ -1041,6 +1044,8 @@ def _make_progress_tqdm(model_name: str, entry: Dict[str, Any]):
                 for cb in listeners:
                     try:
                         cb(frac, stage_text)
+                    except Cancelled:
+                        raise
                     except Exception:
                         pass
 
@@ -1100,8 +1105,16 @@ def _run_download_entry(norm: str, own_entry: Dict[str, Any], *, raise_on_error:
         for cb in listeners:
             try:
                 cb(1.0, f"Модель Whisper {norm} готова")
+            except Cancelled:
+                raise
             except Exception:
                 pass
+    except Cancelled:
+        with _DL_LOCK:
+            own_entry["state"] = "error"
+            own_entry["error"] = "Отменено"
+        _notify_debug(norm, "idle", "")
+        raise
     except Exception as exc:  # noqa: BLE001
         err_msg = str(exc)[:300] or "Не удалось скачать модель Whisper"
         with _DL_LOCK:

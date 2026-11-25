@@ -455,13 +455,6 @@ function heroHTML() {
         </div>
       </div>
       <div class="opt">
-        ${optIcon("subs", "ico-blue")}
-        <span class="opt-label">Язык видео</span>
-        <div class="seg" data-group="language">
-          ${[["auto","Авто"],["ru","Русский"],["en","English"]].map(([v,l]) => `<button data-val="${v}" class="${(o.language || "auto") === v ? "active" : ""}">${l}</button>`).join("")}
-        </div>
-      </div>
-      <div class="opt">
         ${optIcon("access", "ico-gray")}
         <span class="opt-label">Доступ к источнику</span>
         <select id="cookiesSelect" aria-label="Доступ к источнику">
@@ -792,7 +785,7 @@ async function createFromProbe(height) {
     $("#modal").innerHTML = "";
     await loadProjects();
     openProject(project.id);
-    openTemplate(project.id);
+    if (!options.autostart) openTemplate(project.id);
   } catch (err) {
     toast(err.message, "err");
     if (btn) { btn.disabled = false; btn.textContent = "Скачать и настроить"; }
@@ -810,7 +803,7 @@ async function uploadFile(file) {
     const project = await api("/api/upload", { method: "POST", body: form });
     await loadProjects();
     openProject(project.id);
-    openTemplate(project.id);
+    if (!state.opts.aiMode) openTemplate(project.id);
   } catch (e) {
     toast(e.message || "Ошибка загрузки", "err");
   }
@@ -1910,7 +1903,8 @@ async function tmplPoll() {
       ].filter(Boolean).join(" · ");
       return;
     }
-    if (project.status === "done") {
+    if (project.status === "done" || project.status === "running"
+        || project.status === "processing" || project.status === "cancelled") {
       closeTemplate(true);
       openProject(project.id);
     }

@@ -244,9 +244,9 @@ def download_section_smart(
             "concurrent_fragment_downloads": 2,
             "download_ranges": download_range_func(None, [(start, end)]),
             "force_keyframes_at_cuts": True,
-            "ffmpeg_location": str(ffmpeg_bin_dir()),
             "socket_timeout": 30,
         }
+        downloader.ytdlp_ffmpeg(opts)
         if extra_args:
             opts["extractor_args"] = {
                 k: (list(v) if isinstance(v, list) else dict(v) if isinstance(v, dict) else v)
@@ -411,6 +411,7 @@ def rerender_section_clip(
             "end": min(actual, offset + (clip_end - clip_start)),
             "words": words,
         }
-        pipeline._render_one(part, workdir, virtual, settings, on_progress)
+        norm_opts = pipeline.normalize_options(opts)
+        pipeline._render_one(part, workdir, virtual, settings, on_progress, norm_opts)
     finally:
         shutil.rmtree(sec_dir, ignore_errors=True)

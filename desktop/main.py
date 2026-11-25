@@ -246,7 +246,12 @@ class DesktopApi:
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)[:300]}
         name = f"viralcut_{self._safe(project.get('title') or 'clips')}.zip"
-        target = self._ask_target(name) if self._ask_enabled() else "unavailable"
+        from viralcut import settings as app_settings
+
+        conf = app_settings.get()
+        preset_dir = conf.get("clips_dir") or ""
+        ask = self._ask_enabled() and (conf.get("ask_folder", True) or not preset_dir)
+        target = self._ask_target(name) if ask else "unavailable"
         if target is None:
             return {"ok": False, "cancelled": True}
         if target == "unavailable":

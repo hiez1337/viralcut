@@ -365,6 +365,12 @@ def _run_encode(
         proc.wait()
     finally:
         timer.cancel()
+        try:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
+        except Exception:
+            pass
         reader.join(timeout=2)
         for stream in (proc.stdout, proc.stderr):
             try:

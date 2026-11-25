@@ -234,6 +234,22 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
 - **Verification**:
   - `python -m unittest tests.test_custom_features tests.test_render tests.test_ytdlp_ffmpeg.YtDlpSeesFfmpegTest.test_section_without_ffmpeg_raises_actionable_error -v` (48 tests pass).
 
+## Post-Merge Swarm Audit Fixes (v1.6.0)
+- **Goal**: Fix critical runtime, cancellation, UI, and CI bugs uncovered by the 4-agent `/swarm` audit after syncing with `v1.6.0`.
+- **Fixes**:
+  - `viralcut/main.py`: added missing `import traceback` (prevented `NameError` in `_lifespan` and `POST /api/settings`).
+  - `viralcut/pipeline.py` (`rerender_clip`): used `_whisper_lang(opts)` + `model_name` when re-transcribing an `audio_track`, and guarded `Path(project["source"])` against `None` in eco-mode (`segments=True`).
+  - `viralcut/render.py` (`_run_encode`): killed orphaned `ffmpeg` child process in `finally:` when `on_progress` raises `Cancelled` so temp `staged` directory is never locked on Windows.
+  - `viralcut/downloader.py`: propagated `Cancelled` from `ytdlp_bin.download()`, and forwarded `language` to `_download_exact_youtube()` and `_pick_format()`.
+  - `viralcut/custom_whisper.py`: propagated `Cancelled` during `snapshot_download()` / progress callbacks, and fixed `get_effective_recheck_limit()` treating `0` as falsy (`ultra_fast_gpu` / `eco_cpu`).
+  - `viralcut/custom_downloader.py`: used `downloader.ytdlp_ffmpeg(opts)` in `download_section_smart()`, and passed normalized `opts` to `pipeline._render_one()` in `rerender_section_clip()`.
+  - `desktop/main.py` (`save_zip`): loaded `preset_dir` and `ask` from `viralcut.settings` (fixed `NameError: name 'preset_dir' is not defined`).
+  - `web/app.js`: removed duplicate `.seg[data-group="language"]` selector from `heroHTML()`, and guarded/handled `aiMode`/`autostart` (`running`/`processing`/`cancelled`) in `createFromProbe()`, `uploadFile()`, and `tmplPoll()` so the template modal doesn't hang.
+  - `tests/test_download_resilience.py` & `.github/workflows/custom-ci.yml`: fixed infinite `Response.read()` loop in `BinaryEngineTest` and scoped CI to the 19 core & custom test modules.
+  - `tests/test_custom_features.py`: added `MergeRegressionFixesTest` and `test_recheck_limit_zero_not_overwritten_by_default`.
+- **Verification**:
+  - `node --check web/app.js` and full CI test command (254 tests pass, 7 skipped).
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

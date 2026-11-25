@@ -92,7 +92,10 @@ class BinaryEngineTest(unittest.TestCase):
 
         class Response:
             def read(self, n=-1):
-                return payload if not hasattr(self, "_sent") else (setattr(self, "_sent", 1) or b"")
+                if getattr(self, "_sent", False):
+                    return b""
+                self._sent = True
+                return payload
             def __enter__(self):
                 return self
             def __exit__(self, *args):
