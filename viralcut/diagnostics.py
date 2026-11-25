@@ -209,7 +209,9 @@ def summarize(text: str, log_age: Optional[float] = None) -> Dict[str, Any]:
     lines = text.splitlines()
     last = sessions[-1]["lines"] if sessions else []
     fatal = _has_fatal(lines)
+    last_fatal = _has_fatal(last)
     thread_dump = _has_dump(lines)
+    last_thread_dump = _has_dump(last)
     # аварийным считаем запуск без маркера stop — но только у последней сессии:
     # прошлые запуски могли закрыть окно или приложение обновиться
     last_has_stop = any(STOP_MARK.search(line) for line in last)
@@ -220,14 +222,14 @@ def summarize(text: str, log_age: Optional[float] = None) -> Dict[str, Any]:
         if version_match:
             break
     # свежий лог без stop — это работающее приложение, а не падение
-    running = bool(last) and not last_has_stop and not fatal and not thread_dump and (
+    running = bool(last) and not last_has_stop and not last_fatal and not last_thread_dump and (
         log_age is not None and log_age < 180)
     # дамп без фатального заголовка = приложение закрыто сигналом, а не упало
-    signal_exit = bool(thread_dump and not fatal and not last_has_stop)
-    legacy = (version_match is None and not fatal and not last_has_stop
+    signal_exit = bool(last_thread_dump and not last_fatal and not last_has_stop)
+    legacy = (version_match is None and not last_fatal and not last_has_stop
               and not running and not signal_exit)
     crash = bool(last) and not last_has_stop and not legacy and not running and not signal_exit and (
-        fatal or _looks_abrupt(last))
+        last_fatal or _looks_abrupt(last))
     stage = _last_stage(last) or _last_stage(lines)
     errors = _error_lines(lines)
     traces = _tracebacks(lines)
@@ -245,7 +247,7 @@ def summarize(text: str, log_age: Optional[float] = None) -> Dict[str, Any]:
         "last_stage": stage,
         "errors": errors,
         "tracebacks": traces,
-        "advice": _advice(crash, fatal, stage, errors, running, legacy, signal_exit),
+        "advice": _advice(crash, last_fatal, stage, errors, running, legacy, signal_exit),
         "lines": len(lines),
     }
 
@@ -348,7 +350,8 @@ def report(path: Optional[Path] = None, tail_lines: int = TAIL_LINES,
     except OSError:
         age = None
     summary = summarize(text, log_age=age)
-    tail = text.splitlines()[-max(1, int(tail_lines)):]
+    count = max(0, int(tail_lines))
+    tail = text.splitlines()[-count:] if count else []
     return {"log_path": str(log_path), "summary": summary, "system": system or {},
             "tail": tail, "report": format_report(summary, tail, log_path, system)}
 

@@ -81,10 +81,12 @@ def run(task: str, context: Dict[str, Any],
 
     steps: List[Dict[str, Any]] = []
     final_text = ""
+    last_model: Optional[str] = None
     ui: Dict[str, Any] = {}
     for step in range(1, MAX_STEPS + 1):
         try:
             reply = ai_module.chat(messages, max_tokens=900, temperature=0.2)
+            last_model = reply.get("model") or last_model
         except Exception as exc:  # noqa: BLE001 — агент не должен молчать
             if steps:
                 final_text = ("Модель стала недоступна на шаге "
@@ -113,7 +115,7 @@ def run(task: str, context: Dict[str, Any],
 
     if not final_text:
         final_text = "Готово."
-    return {"answer": final_text, "source": "ai", "model": None,
+    return {"answer": final_text, "source": "ai", "model": last_model,
             "steps": steps, "ui": ui,
             "done": sum(1 for s in steps for a in s.get("actions", []) if a.get("ok"))}
 

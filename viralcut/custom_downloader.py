@@ -26,20 +26,24 @@ def pick_best_format(
     from . import downloader
 
     formats = [f for f in (info.get("formats") or []) if f.get("format_id")]
+    def _res(f: Dict[str, Any]) -> int:
+        dims = [int(f[k]) for k in ("width", "height") if f.get(k)]
+        return min(dims) if dims else int(f.get("height") or 0)
+
     videos = [
         f for f in formats
-        if (f.get("vcodec") or "none") != "none" and int(f.get("height") or 0) > 0
+        if (f.get("vcodec") or "none") != "none" and _res(f) > 0
     ]
     if not videos:
         return (downloader.FORMAT_HD if max_height > 360 else downloader.FORMAT_SD), 0
 
-    fitting = [f for f in videos if int(f.get("height") or 0) <= max_height] or videos
+    fitting = [f for f in videos if _res(f) <= max_height] or videos
 
     def rank_video(f: Dict[str, Any]) -> tuple:
         codec = f.get("vcodec") or ""
         proto = (f.get("protocol") or "").lower()
         return (
-            int(f.get("height") or 0),
+            _res(f),
             1 if codec.startswith("avc1") else 0,
             1 if f.get("ext") == "mp4" else 0,
             1 if proto in ("https", "http") else 0,
@@ -48,7 +52,7 @@ def pick_best_format(
         )
 
     video = max(fitting, key=rank_video)
-    height = int(video.get("height") or 0)
+    height = _res(video)
     if (video.get("acodec") or "none") != "none":
         return str(video["format_id"]), height
 

@@ -84,8 +84,6 @@ def _windows_targets() -> List[str]:
 
 def _apply_windows(mode: str) -> None:
     value = _REG_VALUE.get(mode)
-    if not value:
-        return
     try:
         import winreg  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001
@@ -98,7 +96,10 @@ def _apply_windows(mode: str) -> None:
     try:
         for target in _windows_targets():
             try:
-                winreg.SetValueEx(key, target, 0, winreg.REG_SZ, value)
+                if value:
+                    winreg.SetValueEx(key, target, 0, winreg.REG_SZ, value)
+                else:
+                    winreg.DeleteValue(key, target)
             except OSError:
                 continue
     finally:
@@ -128,6 +129,8 @@ def apply(mode: Optional[str] = None) -> Dict[str, Any]:
         else:
             result["mechanism"] = "не поддерживается"
     else:
+        if sys.platform == "win32":
+            _apply_windows("auto")
         result["mechanism"] = "системное решение"
     return result
 

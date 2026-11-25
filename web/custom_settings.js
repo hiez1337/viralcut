@@ -12,19 +12,26 @@
 
   let currentSettingsPayload = null;
   let activePresetId = "auto";
+  let fetchPromise = null;
 
   async function fetchSettings() {
-    try {
-      const res = await fetch("/api/whisper/settings", { cache: "no-store" });
-      if (!res.ok) return null;
-      const data = await res.json();
-      currentSettingsPayload = data;
-      updateSidebarBadge(data);
-      return data;
-    } catch (err) {
-      console.warn("[vcSettings] Не удалось получить настройки:", err);
-      return null;
-    }
+    if (fetchPromise) return fetchPromise;
+    fetchPromise = (async () => {
+      try {
+        const res = await fetch("/api/whisper/settings", { cache: "no-store" });
+        if (!res.ok) return null;
+        const data = await res.json();
+        currentSettingsPayload = data;
+        updateSidebarBadge(data);
+        return data;
+      } catch (err) {
+        console.warn("[vcSettings] Не удалось получить настройки:", err);
+        return null;
+      } finally {
+        fetchPromise = null;
+      }
+    })();
+    return fetchPromise;
   }
 
   function updateSidebarBadge(data) {
@@ -85,6 +92,18 @@
     `;
   }
 
+  function setSelectValue(sel, val, fallback) {
+    if (!sel) return;
+    const raw = val !== undefined && val !== null && val !== "" ? String(val) : String(fallback);
+    if (!Array.from(sel.options).some((o) => o.value === raw)) {
+      const opt = document.createElement("option");
+      opt.value = raw;
+      opt.textContent = raw;
+      sel.appendChild(opt);
+    }
+    sel.value = raw;
+  }
+
   function renderPresetsGrid(presets, currentPreset) {
     if (!presets || !presets.length) return "";
     return `
@@ -92,13 +111,15 @@
         ${presets
           .map((p) => {
             const isActive = p.id === currentPreset;
+            const title = p.label || p.name || p.id || "";
+            const desc = p.desc || p.description || "";
             return `
-            <div class="preset-card ${isActive ? "active" : ""}" data-preset-id="${esc(p.id)}">
+            <div class="preset-card ${isActive ? "active" : ""}" role="button" tabindex="0" aria-pressed="${isActive ? "true" : "false"}" data-preset-id="${esc(p.id)}">
               <div class="preset-card-top">
-                <span class="preset-name">${esc(p.name)}</span>
+                <span class="preset-name">${esc(title)}</span>
                 <span class="preset-badge">${esc(p.badge)}</span>
               </div>
-              <div class="preset-desc">${esc(p.description)}</div>
+              <div class="preset-desc">${esc(desc)}</div>
             </div>
           `;
           })
@@ -118,25 +139,24 @@
       batch_size: 16,
       recheck_limit: 4,
     };
-    const devSelect = $("#vcOptDevice");
-    const compSelect = $("#vcOptCompute");
-    const threadsSelect = $("#vcOptThreads");
-    const beamSelect = $("#vcOptBeam");
-    const batchSelect = $("#vcOptBatch");
-    const recheckSelect = $("#vcOptRecheck");
-
-    if (devSelect) devSelect.value = s.device || "auto";
-    if (compSelect) compSelect.value = s.compute_type || "auto";
-    if (threadsSelect) threadsSelect.value = String(s.cpu_threads ?? 0);
-    if (beamSelect) beamSelect.value = String(s.beam_size ?? 2);
-    if (batchSelect) batchSelect.value = String(s.batch_size ?? 16);
-    if (recheckSelect) recheckSelect.value = String(s.recheck_limit ?? 4);
+    setSelectValue($("#vcOptDevice"), s.device, "auto");
+    setSelectValue($("#vcOptCompute"), s.compute_type, "auto");
+    setSelectValue($("#vcOptThreads"), s.cpu_threads, 0);
+    setSelectValue($("#vcOptBeam"), s.beam_size, 2);
+    setSelectValue($("#vcOptBatch"), s.batch_size, 16);
+    setSelectValue($("#vcOptRecheck"), s.recheck_limit, 4);
   }
 
   function openSettingsModal() {
+    if (typeof window.vcCloseAnyModal === "function") {
+      window.vcCloseAnyModal();
+    }
     if (!currentSettingsPayload) {
       fetchSettings().then((data) => {
         if (data) showModal(data);
+        else if (typeof window.toast === "function") {
+          window.toast("Не удалось загрузить настройки Whisper", "err");
+        }
       });
       return;
     }
@@ -144,6 +164,9 @@
   }
 
   function showModal(data) {
+    if (typeof window.vcCloseAnyModal === "function") {
+      window.vcCloseAnyModal();
+    }
     const modal = $("#modal");
     if (!modal) return;
 
@@ -155,7 +178,7 @@
 
     modal.innerHTML = `
       <div class="modal-backdrop" data-close="settings"></div>
-      <div class="modal-panel settings-panel">
+      <div class="modal-panel workbench vc-settings-panel" role="dialog" aria-modal="true" aria-labelledby="vcSettingsTitle">
         <div class="modal-head">
           <div style="display:flex; align-items:center; gap:10px;">
             <div class="side-settings-ico" style="width:28px;height:28px;">
@@ -164,12 +187,12 @@
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
               </svg>
             </div>
-            <h3 style="margin:0; font-size:16px; font-weight:600;">Оптимизация и аппаратное ускорение Whisper</h3>
+            <h3 id="vcSettingsTitle" style="margin:0; font-size:16px; font-weight:600;">Оптимизация и аппаратное ускорение Whisper</h3>
           </div>
           <button class="icon-btn" data-close="settings" type="button" title="Закрыть">${closeSvg}</button>
         </div>
 
-        <div class="settings-body">
+        <div class="vc-settings-body">
           ${renderHardwareCard(data.hardware)}
 
           <div>
@@ -301,30 +324,43 @@
     const batchSelect = $("#vcOptBatch", modal);
     const recheckSelect = $("#vcOptRecheck", modal);
 
-    if (devSelect) devSelect.value = s.device || "auto";
-    if (compSelect) compSelect.value = s.compute_type || "auto";
-    if (threadsSelect) threadsSelect.value = String(s.cpu_threads ?? 0);
-    if (beamSelect) beamSelect.value = String(s.beam_size ?? 2);
-    if (batchSelect) batchSelect.value = String(s.batch_size ?? 16);
-    if (recheckSelect) recheckSelect.value = String(s.recheck_limit ?? 4);
+    setSelectValue(devSelect, s.device, "auto");
+    setSelectValue(compSelect, s.compute_type, "auto");
+    setSelectValue(threadsSelect, s.cpu_threads, 0);
+    setSelectValue(beamSelect, s.beam_size, 2);
+    setSelectValue(batchSelect, s.batch_size, 16);
+    setSelectValue(recheckSelect, s.recheck_limit, 4);
 
-    // Клик по карточке пресета
+    // Клик или клавиша по карточке пресета
     const cards = $$(".preset-card", modal);
+    const selectPresetCard = (card) => {
+      const pid = card.getAttribute("data-preset-id");
+      activePresetId = pid;
+      cards.forEach((c) => {
+        const match = c === card;
+        c.classList.toggle("active", match);
+        c.setAttribute("aria-pressed", match ? "true" : "false");
+      });
+      fillFormFromPreset(pid, data.presets || []);
+      const modeTag = $("#vcModeTag", modal);
+      if (modeTag) modeTag.textContent = "Режим: Пресет";
+    };
     cards.forEach((card) => {
-      card.addEventListener("click", () => {
-        const pid = card.getAttribute("data-preset-id");
-        activePresetId = pid;
-        cards.forEach((c) => c.classList.toggle("active", c === card));
-        fillFormFromPreset(pid, data.presets || []);
-        const modeTag = $("#vcModeTag", modal);
-        if (modeTag) modeTag.textContent = "Режим: Пресет";
+      card.addEventListener("click", () => selectPresetCard(card));
+      card.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        e.preventDefault();
+        selectPresetCard(card);
       });
     });
 
     // Изменение любого селекта переключает на "Свой"
     const onParamChange = () => {
       activePresetId = "custom";
-      cards.forEach((c) => c.classList.remove("active"));
+      cards.forEach((c) => {
+        c.classList.remove("active");
+        c.setAttribute("aria-pressed", "false");
+      });
       const modeTag = $("#vcModeTag", modal);
       if (modeTag) modeTag.textContent = "Режим: Пользовательский";
     };
@@ -338,7 +374,11 @@
     if (resetBtn) {
       resetBtn.addEventListener("click", () => {
         activePresetId = "auto";
-        cards.forEach((c) => c.classList.toggle("active", c.getAttribute("data-preset-id") === "auto"));
+        cards.forEach((c) => {
+          const match = c.getAttribute("data-preset-id") === "auto";
+          c.classList.toggle("active", match);
+          c.setAttribute("aria-pressed", match ? "true" : "false");
+        });
         fillFormFromPreset("auto", data.presets || []);
         const modeTag = $("#vcModeTag", modal);
         if (modeTag) modeTag.textContent = "Режим: Пресет";
@@ -348,6 +388,10 @@
     // Кнопка сохранения
     const saveBtn = $("#vcBtnSaveSettings", modal);
     if (saveBtn) {
+      const safeInt = (sel, def) => {
+        const n = sel ? parseInt(sel.value, 10) : NaN;
+        return Number.isFinite(n) ? n : def;
+      };
       saveBtn.addEventListener("click", async () => {
         saveBtn.disabled = true;
         saveBtn.textContent = "Применение…";
@@ -356,10 +400,10 @@
             preset: activePresetId,
             device: devSelect ? devSelect.value : "auto",
             compute_type: compSelect ? compSelect.value : "auto",
-            cpu_threads: threadsSelect ? parseInt(threadsSelect.value, 10) : 0,
-            beam_size: beamSelect ? parseInt(beamSelect.value, 10) : 2,
-            batch_size: batchSelect ? parseInt(batchSelect.value, 10) : 16,
-            recheck_limit: recheckSelect ? parseInt(recheckSelect.value, 10) : 4,
+            cpu_threads: safeInt(threadsSelect, 0),
+            beam_size: safeInt(beamSelect, 2),
+            batch_size: safeInt(batchSelect, 16),
+            recheck_limit: safeInt(recheckSelect, 4),
           };
           const res = await fetch("/api/whisper/settings", {
             method: "POST",

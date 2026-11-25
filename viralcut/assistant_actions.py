@@ -91,19 +91,26 @@ def _style_fields(item: Dict[str, Any]) -> Dict[str, Any]:
         out["aspect"] = item["aspect"]
     if str(item.get("mode") or "") in _MODES:
         out["mode"] = item["mode"]
-    if str(item.get("accent") or "") in _ACCENTS:
+    if str(item.get("accent") or "") in _ACCENTS or str(item.get("accent") or "") in (
+            "gold", "emerald", "sky", "violet", "rose", "mint", "amber", "coral", "crimson",
+            "cobalt", "ice", "white", "sunset"):
         out["accent"] = item["accent"]
-    if str(item.get("sub_font") or "") in _FONTS:
-        out["sub_font"] = item["sub_font"]
+    sub_font = str(item.get("sub_font") or "")
+    if sub_font in _FONTS or sub_font in {
+        "geologica", "ibmplex", "rubikmono", "montserrat", "lato", "play", "ptsans",
+        "oswald", "unbounded", "caveat", "golos", "onest", "marmelad", "stalinist",
+        "underdog", "marckscript",
+    }:
+        out["sub_font"] = sub_font
     if str(item.get("sub_position") or "") in _POSITIONS:
         out["sub_position"] = item["sub_position"]
     if isinstance(item.get("sub_size"), (int, float)):
-        out["sub_size"] = max(40, min(240, int(item["sub_size"])))
+        out["sub_size"] = max(70, min(180, int(item["sub_size"])))
     if "subtitles" in item:
         out["subtitles"] = bool(item["subtitles"])
     if "cut_pauses" in item:
         out["cut_pauses"] = bool(item["cut_pauses"])
-    if str(item.get("language") or "") in ("auto", "ru", "en"):
+    if str(item.get("language") or "") in ("auto", "ru", "en", "orig"):
         out["language"] = item["language"]
     return out
 
@@ -300,7 +307,7 @@ def parse_local(question: str) -> List[Dict[str, Any]]:
     mentions_limit = bool(re.search(r"(лимит|потолок|не более|огранич)", text))
     if mentions_limit and number and (mentions_cpu or "процент" in text):
         settings_action["cpu_limit"] = max(25, min(100, number))
-    if "мощност" in text and number:
+    if "мощност" in text and number is not None:
         settings_action["power"] = max(0, min(100, number))
     if "дискретн" in text:
         settings_action["gpu_preference"] = "discrete"
@@ -348,14 +355,16 @@ def execute(action: Dict[str, Any],
     kind = action.get("type")
     if kind == "set_settings":
         from . import ai as ai_module  # noqa: F401 — ключи не трогаем
-        from . import cpu_limit, gpu_pref, settings
+        from . import cpu_limit, gpu_pref, render, settings
 
-        patch = {key: action[key] for key in ("power", "cpu_limit", "gpu_preference")
+        patch = {key: action[key] for key in ("power", "cpu_limit", "gpu_preference", "encoder")
                  if key in action}
         settings.update(patch)
         resources.invalidate()
         cpu_limit.apply()
         gpu_pref.apply()
+        if "gpu_preference" in patch or "encoder" in patch:
+            render.reset_hw_encoder()
         summary = resources.summary()
         return {"ok": True, "type": kind, "applied": patch,
                 "summary": {key: summary.get(key) for key in
@@ -515,6 +524,8 @@ def _start_cut(action: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         options["ai_mode"] = True
         options["autostart"] = True
         options["ai_prompt"] = action.get("ai_prompt") or ""
+    else:
+        options["autostart"] = True
     project_id = str(action.get("project_id") or "").strip()
     url = str(action.get("url") or "").strip()
 
@@ -534,15 +545,20 @@ def _start_cut(action: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any
         if status in ("queued", "preparing", "processing", "running"):
             return {"ok": True, "type": "start_cut", "project_id": project_id,
                     "message": "Нарезка уже идёт — подождите результат."}
+        pipeline.clear_cancel(project_id)
         db.update_project(project_id, options=pipeline.normalize_options(
             {**(project.get("options") or {}), **options}))
         if status in ("new", "", "error", "cancelled"):
             jobs.submit_prepare(project_id)
         else:
+            db.clear_clips(project_id)
             jobs.submit_process(project_id)
         return {"ok": True, "type": "start_cut", "project_id": project_id,
                 "message": "Запустил нарезку проекта — клипы появятся сами."}
 
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "type": "start_cut",
+                "message": "Нужна ссылка, начинающаяся с http:// или https://."}
     normalized = pipeline.normalize_options(options)
     project = db.create_project("pending", normalized, title=url[:120] or "Новый проект")
     db.update_project(project["id"], url=url)

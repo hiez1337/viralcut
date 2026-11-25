@@ -292,13 +292,18 @@ def pip_options(opts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     except (TypeError, ValueError):
         return None
     pos = conf.get("pos") or [0.72, 0.78]
+    try:
+        px = float(pos[0])
+        py = float(pos[1])
+    except (TypeError, ValueError, IndexError):
+        px, py = 0.72, 0.78
     result = {
         "cam": {"x": cx, "y": cy, "w": cw, "h": ch} if cw >= 32 and ch >= 32 else None,
         "cam_corner": conf.get("cam_corner"),
         "cam_share": float(conf.get("cam_share") or 0.3),
         "radius": int(conf.get("radius") or 20),
         "size": float(conf.get("size") or 0.28),
-        "pos": [float(pos[0]), float(pos[1])],
+        "pos": [px, py],
     }
     return result
 
@@ -521,6 +526,7 @@ def prepare_project(pid: str) -> None:
             res_txt = f"{info['width']}×{info['height']}"
         else:
             res_txt = f"{info['height']}p"
+        _check_cancel(pid)
         _update(pid, status="review", progress=100, error=None,
                 stage=f"Видео готово ({res_txt}{took_txt}) · настройте субтитры")
         if opts.get("autostart"):
@@ -554,7 +560,8 @@ def process_project(pid: str) -> None:
         _update(pid, progress=round(max(0.0, min(1.0, value)) * 100, 1), stage=stage,
                 status="running")
 
-    if opts.get("segments"):
+    meta_proj = project.get("meta") or {}
+    if opts.get("segments") or meta_proj.get("segments_mode"):
         pending = [c for c in db.list_clips(pid) if c["status"] == "pending"]
         if pending:
             try:
@@ -703,7 +710,7 @@ def process_project(pid: str) -> None:
                     state["cancel"] = True
                 return False
             try:
-                _render_one(source, workdir, clip, clip_settings, lambda p: None, opts)
+                _render_one(source, workdir, clip, clip_settings, lambda _p: _check_cancel(pid), opts)
             except Cancelled:
                 with lock:
                     state["cancel"] = True
@@ -748,6 +755,7 @@ def process_project(pid: str) -> None:
                                + (f" Причина: {str(reason)[:300]}" if reason else ""))
         word = "клип" if rendered % 10 == 1 and rendered % 100 != 11 else (
             "клипа" if 2 <= rendered % 10 <= 4 and not 12 <= rendered % 100 <= 14 else "клипов")
+        _check_cancel(pid)
         _update(pid, status="done", progress=100, error=None,
                 stage=f"Готово: {rendered} {word} за {elapsed:.0f} с")
         db.merge_meta(pid, {"elapsed": elapsed, "clips": rendered})
@@ -870,7 +878,9 @@ def clip_srt(clip: Dict[str, Any]) -> str:
             project = db.get_project(clip["project_id"]) or {}
             source = project.get("source")
             if source and Path(source).is_file():
-                spans = _pause_spans(Path(source), float(clip["start"]), float(clip["end"]))
+                audio_track = int(normalize_options(project.get("options")).get("audio_track") or 0)
+                spans = _pause_spans(Path(source), float(clip["start"]), float(clip["end"]),
+                                     audio_track=audio_track)
             if not spans or (output_length and abs(_subtitle_timeline(clip, spans)[2] - output_length) > 0.15):
                 raise ValueError("Пересоберите клип, чтобы восстановить точный тайминг SRT.")
     return subtitles.to_srt(*_subtitle_timeline(clip, spans or []))
@@ -927,6 +937,7 @@ def _render_one(source: Path, workdir: Path, clip: Dict[str, Any],
                 font=settings.get("sub_font", "montserrat"),
                 position=settings.get("sub_position", "bottom"),
                 offset=int(settings.get("sub_offset", 0)),
+                free_pos=settings.get("sub_free"),
                 speed=settings.get("sub_speed", "calm"),
             )
             ass_path = staged / f"{clip['id']}.ass"
@@ -992,7 +1003,7 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         raise RuntimeError("Исходное видео не найдено: запись эфира удалена или ещё не началась.")
     settings = dict(restore["settings"] if restore is not None else clip["settings"])
     for key in ("aspect", "mode", "subtitles", "accent", "uppercase", "show_hook", "focus_x",
-                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_speed", "cut_pauses"):
+                "sub_size", "sub_font", "sub_position", "sub_offset", "sub_free", "sub_speed", "cut_pauses"):
         if key in payload and payload[key] is not None:
             settings[key] = payload[key]
     start = float(payload.get("start", clip["start"]))
@@ -1007,11 +1018,12 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
         from . import live
         # старые live-клипы хранили слова относительно окна эфира
         words = live._absolute_words(words, float(clip["start"]))
-    elif not settings.get("segments") and project.get("source") and (clip.get("path") or "audio_track" in payload):
+    elif not settings.get("segments") and project.get("source") and (clip.get("path") or payload.get("audio_track") is not None):
         source = Path(project["source"])
         track_count = utils.probe(source)["audio_tracks"]
-        track = payload.get("audio_track", opts["audio_track"])
-        if "audio_track" in payload and track >= track_count:
+        raw_track = payload.get("audio_track")
+        track = int(opts["audio_track"] if raw_track is None else raw_track)
+        if raw_track is not None and (track < 0 or track >= track_count):
             raise ValueError("Выбранная аудиодорожка отсутствует в исходнике")
         track = track if track < track_count else 0
         opts["audio_track"] = track
@@ -1047,10 +1059,11 @@ def rerender_clip(clip_id: str, payload: Dict[str, Any],
     }
     updated = {**clip, **updates, "settings": settings}
     if settings.get("segments"):
-        db.update_clip(clip_id, status="rendering", start=start, end=end, words=words,
+        db.update_clip(clip_id, status="rendering", error=None)
+        custom_downloader.rerender_section_clip(project, updated, workdir, settings, on_progress)
+        db.update_clip(clip_id, status="ready", start=start, end=end, words=words,
                        hook=updates["hook"], title=updates["title"],
                        caption=updates["caption"], settings=settings, error=None)
-        custom_downloader.rerender_section_clip(project, db.get_clip(clip_id), workdir, settings, on_progress)
     elif project.get("source"):
         _render_one(Path(project["source"]), workdir, updated, settings, on_progress, opts,
                     clip_updates=updates)
@@ -1068,11 +1081,20 @@ def export_zip(project_id: str, dest: Path) -> Path:
     import zipfile
 
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(dest, "w", zipfile.ZIP_STORED) as zf:
-        for c in clips:
-            src = Path(c["path"])
-            if src.exists():
-                zf.write(src, arcname=f"{c['idx'] + 1:02d}_{_slug(c['title'])}.mp4")
+    tmp = dest.with_name(f".{dest.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    added = 0
+    try:
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_STORED) as zf:
+            for c in clips:
+                src = Path(c["path"])
+                if src.is_file():
+                    zf.write(src, arcname=f"{c['idx'] + 1:02d}_{_slug(c['title'])}.mp4")
+                    added += 1
+        if added == 0:
+            raise RuntimeError("Файлы клипов не найдены на диске")
+        os.replace(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
     return dest
 
 
@@ -1160,6 +1182,16 @@ def add_manual_clip(pid: str, start: float, end: float,
                        f"Вручную {int(start // 60)}:{int(start % 60):02d}", words, settings)
     from . import jobs as _jobs
 
+    prev_status = str(project.get("status") or "done")
+    if prev_status in ("queued", "preparing", "running", "processing"):
+        prev_status = "done"
+    prev_stage = str(project.get("stage") or "Готово")
     db.update_project(pid, status="running", stage="Рендер клипа")
-    _jobs.submit_rerender(clip["id"], {})
+    _jobs.submit_rerender(
+        clip["id"],
+        {},
+        restore_project_status=prev_status,
+        restore_project_stage=prev_stage,
+    )
+    return clip
     return clip

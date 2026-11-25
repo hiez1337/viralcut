@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,17 +20,32 @@ from .config import ASSETS_DIR
 
 _MODEL = ASSETS_DIR / "models" / "yunet.onnx"
 _MAX_CAM_SHARE = 0.34  # окно камеры не больше трети ширины кадра
+_DETECTOR_LOCK = threading.Lock()
+_DETECTOR_CACHE: Optional[Tuple[Any, str]] = None
+_MASK_LOCK = threading.Lock()
 
 
 def _detector():
-    import cv2
+    global _DETECTOR_CACHE
+    with _DETECTOR_LOCK:
+        if _DETECTOR_CACHE is not None:
+            return _DETECTOR_CACHE
+        import cv2
 
-    if _MODEL.exists():
-        try:
-            return cv2.FaceDetectorYN.create(str(_MODEL), "", (320, 320), 0.6, 0.3, 5000), "yunet"
-        except Exception:  # noqa: BLE001
-            pass
-    return cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"), "haar"
+        if _MODEL.exists():
+            try:
+                _DETECTOR_CACHE = (
+                    cv2.FaceDetectorYN.create(str(_MODEL), "", (320, 320), 0.6, 0.3, 5000),
+                    "yunet",
+                )
+                return _DETECTOR_CACHE
+            except Exception:  # noqa: BLE001
+                pass
+        _DETECTOR_CACHE = (
+            cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml"),
+            "haar",
+        )
+        return _DETECTOR_CACHE
 
 
 def _faces(det, kind: str, frame) -> List[Tuple[float, float, float, float]]:
@@ -180,24 +197,29 @@ def ensure_mask(size: int, radius: int = 20) -> Optional[Path]:
     cache.mkdir(parents=True, exist_ok=True)
     radius = max(0, min(int(radius), size // 2))
     path = cache / f"mask_{size}_{radius}.png"
-    if path.exists() and path.stat().st_size > 0:
-        return path
-    inner = size / 2.0 - radius
-    centre = size / 2.0 - 0.5
-    expr = (f"if(lte(hypot(max(0\\,abs(X-{centre:.1f})-{inner:.1f})"
-            f"\\,max(0\\,abs(Y-{centre:.1f})-{inner:.1f}))\\,{radius}),255,0)")
-    cmd = [utils.ffmpeg(), "-y", "-v", "error", "-f", "lavfi",
-           "-i", f"color=c=black:s={size}x{size},format=gray",
-           "-vf", f"geq=lum='{expr}'", "-frames:v", "1", str(path)]
-    try:
-        proc = utils.run(cmd, timeout=30)
-        if proc.returncode != 0 or not path.exists():
-            print(f"[pip] маска не создалась: {(proc.stderr or '')[-200:]}", file=__import__("sys").stderr)
+    with _MASK_LOCK:
+        if path.exists() and path.stat().st_size > 0:
+            return path
+        inner = size / 2.0 - radius
+        centre = size / 2.0 - 0.5
+        expr = (f"if(lte(hypot(max(0\\,abs(X-{centre:.1f})-{inner:.1f})"
+                f"\\,max(0\\,abs(Y-{centre:.1f})-{inner:.1f}))\\,{radius}),255,0)")
+        tmp = cache / f".mask_{size}_{radius}.{os.getpid()}.{threading.get_ident()}.png"
+        cmd = [utils.ffmpeg(), "-y", "-v", "error", "-f", "lavfi",
+               "-i", f"color=c=black:s={size}x{size},format=gray",
+               "-vf", f"geq=lum='{expr}'", "-frames:v", "1", str(tmp)]
+        try:
+            proc = utils.run(cmd, timeout=30)
+            if proc.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+                print(f"[pip] маска не создалась: {(proc.stderr or '')[-200:]}", file=__import__("sys").stderr)
+                return None
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[pip] маска не создалась: {exc}", file=__import__("sys").stderr)
             return None
-    except Exception as exc:  # noqa: BLE001
-        print(f"[pip] маска не создалась: {exc}", file=__import__("sys").stderr)
-        return None
-    return path
+        finally:
+            tmp.unlink(missing_ok=True)
+        return path
 
 
 def build_filters(cam: Dict[str, Any], size: int, x: int, y: int, mask: Path,

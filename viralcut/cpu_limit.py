@@ -40,7 +40,9 @@ _state: Dict[str, Any] = {
     "applied": None,       # какой лимит уже применён
     "throttler": None,     # объект диспетчера (POSIX)
     "job": None,           # handle Job Object (Windows)
+    "job_assigned": False,
 }
+_KERNEL32: Any = None
 
 
 def _clamp(value: Any) -> int:
@@ -92,27 +94,69 @@ _CPU_RATE_CONTROL_ENABLE = 0x1
 _CPU_RATE_CONTROL_HARD_CAP = 0x4
 
 
+def _k32():
+    global _KERNEL32
+    if _KERNEL32 is not None:
+        return _KERNEL32
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD,
+    ]
+    k32.SetInformationJobObject.restype = wintypes.BOOL
+    k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    k32.AssignProcessToJobObject.restype = wintypes.BOOL
+    k32.GetCurrentProcess.argtypes = []
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    _KERNEL32 = k32
+    return k32
+
+
 def _windows_apply(percent: int) -> bool:
-    """Ставит жёсткий потолок на процесс и всех его детей."""
+    """Ставит (или при >=100 снимает) жёсткий потолок на процесс и всех его детей."""
     try:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32 = _k32()
     except Exception:  # noqa: BLE001
         return False
     try:
-        if not _state.get("job"):
+        job = _state.get("job")
+        if percent >= 100 and not job:
+            return True
+        created = False
+        if not job:
             job = kernel32.CreateJobObjectW(None, None)
             if not job:
                 return False
             _state["job"] = job
+            created = True
         info = _JOBOBJECT_CPU_RATE_CONTROL_INFORMATION()
-        info.ControlFlags = _CPU_RATE_CONTROL_ENABLE | _CPU_RATE_CONTROL_HARD_CAP
-        # CpuRate — в сотых долях процента
-        info.CpuRate = max(1, min(10000, percent * 100))
+        if percent >= 100:
+            info.ControlFlags = 0
+            info.CpuRate = 0
+        else:
+            info.ControlFlags = _CPU_RATE_CONTROL_ENABLE | _CPU_RATE_CONTROL_HARD_CAP
+            # CpuRate — в сотых долях процента
+            info.CpuRate = max(1, min(10000, percent * 100))
         ok = kernel32.SetInformationJobObject(
-            _state["job"], _JOB_CPU_RATE_CONTROL, ctypes.byref(info), ctypes.sizeof(info))
+            job, _JOB_CPU_RATE_CONTROL, ctypes.byref(info), ctypes.sizeof(info))
         if not ok:
+            if created:
+                kernel32.CloseHandle(job)
+                _state["job"] = None
+                _state["job_assigned"] = False
             return False
-        kernel32.AssignProcessToJobObject(_state["job"], kernel32.GetCurrentProcess())
+        if not _state.get("job_assigned"):
+            if not kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()):
+                if created:
+                    kernel32.CloseHandle(job)
+                    _state["job"] = None
+                    return False
+            _state["job_assigned"] = True
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -230,6 +274,7 @@ class Throttler:
         self.percent = percent
         self.pid = pid or os.getpid()
         self._stop = threading.Event()
+        self._state_lock = threading.Lock()
         self._thread: Optional[threading.Thread] = None
         self._stopped: List[int] = []
         self._last: Dict[int, float] = {}
@@ -250,13 +295,16 @@ class Throttler:
             self._thread = None
 
     def _resume(self) -> None:
-        for pid in self._stopped:
+        with self._state_lock:
+            stopped = list(self._stopped)
+            self._stopped = []
+            last_pids = list(self._last)
+        for pid in stopped:
             try:
                 os.kill(pid, signal.SIGCONT)
             except OSError:
                 pass
-        self._stopped = []
-        for pid in list(self._last):
+        for pid in last_pids:
             try:
                 os.kill(pid, signal.SIGCONT)
             except OSError:
@@ -278,30 +326,36 @@ class Throttler:
             span = max(0.02, time.monotonic() - started)
             times = _tree_cpu(self.pid)
             if not times:
-                self._last = {}
-                self._last_ts = time.monotonic()
+                with self._state_lock:
+                    self._last = {}
+                    self._last_ts = time.monotonic()
                 continue
             pids = list(times)
             used = 0.0
-            for pid, total in times.items():
-                previous = self._last.get(pid)
-                if previous is not None and total >= previous:
-                    used += total - previous
-                self._last[pid] = total
-            for pid in list(self._last):
-                if pid not in times:
-                    self._last.pop(pid, None)
-            self._last_ts = time.monotonic()
+            with self._state_lock:
+                for pid, total in times.items():
+                    previous = self._last.get(pid)
+                    if previous is not None and total >= previous:
+                        used += total - previous
+                    self._last[pid] = total
+                for pid in list(self._last):
+                    if pid not in times:
+                        self._last.pop(pid, None)
+                self._last_ts = time.monotonic()
             budget = self._budget_cores * span
             if used <= budget:
                 continue
             excess = min(1.5, max(0.01, (used - budget) / used * span))
+            newly_stopped: List[int] = []
             for pid in pids:
                 try:
                     os.kill(pid, signal.SIGSTOP)
                 except OSError:
                     continue
-                self._stopped.append(pid)
+                newly_stopped.append(pid)
+            if newly_stopped:
+                with self._state_lock:
+                    self._stopped.extend(newly_stopped)
             self._stop.wait(excess)
             self._resume()
 
@@ -334,6 +388,7 @@ def apply(percent: Optional[int] = None) -> Optional[int]:
 
         if sys.platform == "win32":
             if target >= 100:
+                _windows_apply(100)
                 _state["applied"] = target
                 return target
             if not _windows_apply(target):
@@ -358,6 +413,8 @@ def stop() -> None:
         if throttler is not None:
             throttler.stop()
             _state["throttler"] = None
+        if sys.platform == "win32" and _state.get("job"):
+            _windows_apply(100)
         _state["applied"] = None
 
 

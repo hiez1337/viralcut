@@ -486,27 +486,29 @@ def _sample_gpu(tracked_pids: List[int]) -> Dict[str, Any]:
             "temp_c": round(temp_val) if temp_val is not None else None,
             "process_on_gpu": False,
         }
-        apps = subprocess.run(
-            ["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-            errors="replace",
-            **subprocess_kwargs(),
-        )
-        if apps.returncode == 0 and apps.stdout:
-            gpu_pids = set()
-            for row in apps.stdout.strip().splitlines():
-                head = row.split(",", 1)[0].strip()
-                if head.isdigit():
-                    gpu_pids.add(int(head))
-            watch_pids = {os.getpid(), *(int(p) for p in tracked_pids)}
-            gpu["process_on_gpu"] = bool(watch_pids & gpu_pids)
+        if tracked_pids:
+            apps = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,process_name", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=2.0,
+                errors="replace",
+                **subprocess_kwargs(),
+            )
+            if apps.returncode == 0 and apps.stdout:
+                gpu_pids = set()
+                for row in apps.stdout.strip().splitlines():
+                    head = row.split(",", 1)[0].strip()
+                    if head.isdigit():
+                        gpu_pids.add(int(head))
+                watch_pids = {os.getpid(), *(int(p) for p in tracked_pids)}
+                gpu["process_on_gpu"] = bool(watch_pids & gpu_pids)
         return gpu
     except FileNotFoundError:
         _GPU_MISSING_UNTIL = time.monotonic() + 60.0
         return empty
     except Exception:
+        _GPU_MISSING_UNTIL = time.monotonic() + 15.0
         return empty
 
 
@@ -529,6 +531,12 @@ def _safe_mtime(path: Path) -> float:
         return float(path.stat().st_mtime)
     except OSError:
         return 0.0
+
+
+def invalidate_idle_whisper() -> None:
+    global _IDLE_WHISPER_CANDIDATE
+    with _LOCK:
+        _IDLE_WHISPER_CANDIDATE = None
 
 
 def _resolved_idle_whisper() -> Tuple[str, str]:
@@ -643,17 +651,13 @@ def _collect_active_projects() -> List[Dict[str, Any]]:
             projects.append(proj)
 
     try:
-        recent_items = db.list_projects(12)
+        recent_items = db.list_active_projects_brief(8)
     except Exception:
         recent_items = []
     for item in recent_items:
-        if item["id"] not in seen and item.get("status") in ("queued", "preparing", "running"):
+        if item["id"] not in seen:
             seen.add(item["id"])
-            try:
-                proj = db.get_project(item["id"]) or item
-            except Exception:
-                proj = item
-            projects.append(proj)
+            projects.append(item)
 
     now = time.time()
     out: List[Dict[str, Any]] = []
@@ -716,7 +720,7 @@ def snapshot() -> Dict[str, Any]:
     except Exception:
         render_workers = 1
     try:
-        hw_enc = render.hw_encoder()
+        hw_enc = render.hw_cached()
     except Exception:
         hw_enc = None
 

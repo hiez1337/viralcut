@@ -503,13 +503,24 @@ def register_cuda_dlls() -> None:
             os.environ["PATH"] = os.pathsep.join(path_parts)
 
 
+_CT2_CUDA_CACHE: Dict[str, Any] = {"ts": 0.0, "count": None}
+_GPU_HW_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+
 def _ct2_cuda_device_count() -> int:
+    now = time.monotonic()
+    cached = _CT2_CUDA_CACHE.get("count")
+    if cached is not None and (now - float(_CT2_CUDA_CACHE.get("ts") or 0.0)) < 30.0:
+        return int(cached)
     try:
         import ctranslate2
 
-        return int(ctranslate2.get_cuda_device_count())
+        count = int(ctranslate2.get_cuda_device_count())
     except Exception:
-        return 0
+        count = 0
+    _CT2_CUDA_CACHE["count"] = count
+    _CT2_CUDA_CACHE["ts"] = now
+    return count
 
 
 def _cuda_dlls_available() -> bool:
@@ -611,19 +622,30 @@ def get_system_hardware_info() -> Dict[str, Any]:
     vram_total_mb = 0.0
     vram_free_mb = 0.0
     if gpu_detected:
-        try:
-            import subprocess
-            cmd = ["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"]
-            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
-            if res.returncode == 0 and res.stdout.strip():
-                parts = [p.strip() for p in res.stdout.strip().split(",")]
-                if parts:
-                    gpu_name = parts[0]
-                if len(parts) >= 3:
-                    vram_total_mb = float(parts[1])
-                    vram_free_mb = float(parts[2])
-        except Exception:
-            pass
+        now = time.monotonic()
+        cached_gpu = _GPU_HW_CACHE.get("data")
+        if cached_gpu is not None and (now - float(_GPU_HW_CACHE.get("ts") or 0.0)) < 20.0:
+            gpu_name, vram_total_mb, vram_free_mb = cached_gpu
+        else:
+            try:
+                import subprocess
+                cmd = ["nvidia-smi", "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"]
+                kw: Dict[str, Any] = {"capture_output": True, "text": True, "check": False, "timeout": 3.0}
+                if sys.platform.startswith("win"):
+                    kw["creationflags"] = 0x08000000
+                res = subprocess.run(cmd, **kw)
+                if res.returncode == 0 and res.stdout.strip():
+                    first_line = res.stdout.strip().splitlines()[0]
+                    parts = [p.strip() for p in first_line.split(",")]
+                    if parts:
+                        gpu_name = parts[0]
+                    if len(parts) >= 3:
+                        vram_total_mb = float(parts[1])
+                        vram_free_mb = float(parts[2])
+            except Exception:
+                pass
+            _GPU_HW_CACHE["data"] = (gpu_name, vram_total_mb, vram_free_mb)
+            _GPU_HW_CACHE["ts"] = now
 
     hw.update({
         "gpu_detected": gpu_detected,
@@ -704,6 +726,11 @@ def set_whisper_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         current_settings = cur.get("settings")
         if not isinstance(current_settings, dict):
             current_settings = dict(DEFAULT_OPTIMIZATION_SETTINGS)
+        prev_model_key = (
+            current_settings.get("device"),
+            current_settings.get("compute_type"),
+            current_settings.get("cpu_threads"),
+        )
 
         preset_id = str(new_settings.get("preset") or "").strip()
         matched_preset = next((p for p in OPTIMIZATION_PRESETS if p["id"] == preset_id), None)
@@ -734,11 +761,22 @@ def set_whisper_settings(new_settings: Dict[str, Any]) -> Dict[str, Any]:
         tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(path)
         _RUNTIME_SETTINGS = dict(current_settings)
+        new_model_key = (
+            current_settings.get("device"),
+            current_settings.get("compute_type"),
+            current_settings.get("cpu_threads"),
+        )
 
-    # Invalidate cached Whisper model if device or compute changed
+    # Invalidate cached Whisper model only when device/compute/cpu_threads changed
+    if new_model_key != prev_model_key:
+        try:
+            from . import transcribe
+            transcribe._reset_model()
+        except Exception:
+            pass
     try:
-        from . import transcribe
-        transcribe._reset_model()
+        from . import custom_debug
+        custom_debug.invalidate_idle_whisper()
     except Exception:
         pass
 
@@ -860,20 +898,25 @@ def whisper_candidates(
     if whisper_compute != "auto" and whisper_compute != "int8":
         eff_compute = whisper_compute
 
+    def _cpu_list(comp: str) -> List[Tuple[str, str]]:
+        if comp in ("float16", "int8_float16"):
+            return [("cpu", "int8"), ("cpu", "float32")]
+        return [("cpu", comp)]
+
     if eff_device == "cpu":
-        return [("cpu", eff_compute)]
+        return _cpu_list(eff_compute)
 
     if eff_device == "cuda":
         return [("cuda", eff_compute), ("cuda", "int8_float16"), ("cpu", "int8")]
 
     if sys.platform == "darwin":
         if long_audio:
-            return [("cpu", eff_compute)]
-        return [("mps", "float16"), ("cpu", eff_compute)]
+            return _cpu_list(eff_compute)
+        return [("mps", "float16")] + _cpu_list(eff_compute)
 
     if _has_cuda_gpu():
         return [("cuda", eff_compute), ("cuda", "int8_float16"), ("cpu", "int8")]
-    return [("cpu", eff_compute)]
+    return _cpu_list(eff_compute)
 
 
 def _notify_debug(model: str, status: str, fallback_reason: Optional[str] = None) -> None:
@@ -1111,8 +1154,9 @@ def _run_download_entry(norm: str, own_entry: Dict[str, Any], *, raise_on_error:
                 pass
     except Cancelled:
         with _DL_LOCK:
-            own_entry["state"] = "error"
-            own_entry["error"] = "Отменено"
+            if own_entry.get("state") != "done":
+                own_entry["state"] = "error"
+                own_entry["error"] = "Отменено"
         _notify_debug(norm, "idle", "")
         raise
     except Exception as exc:  # noqa: BLE001

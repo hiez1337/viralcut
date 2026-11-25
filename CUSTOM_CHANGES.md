@@ -250,6 +250,28 @@ When upstream makes major refactors, an LLM agent can use this log to re-apply o
 - **Verification**:
   - `node --check web/app.js` and full CI test command (254 tests pass, 7 skipped).
 
+## Deep Swarm Bug-Hunt & Optimization Pass (v1.6.0)
+- **Goal**: Resolve subtle correctness bugs, Windows/process edge cases, security/XSS gaps, UI regressions, and CPU/RAM/DOM bottlenecks across the codebase.
+- **Custom file fixes & optimizations**:
+  - `viralcut/custom_whisper.py`: added TTL caches for CT2 CUDA and GPU info, hidden-console `nvidia-smi` calls (`0x08000000`, 3s timeout), skipped redundant `transcribe._reset_model()` reloads, mapped CPU-incompatible `float16`/`int8_float16` to `[("cpu", "int8"), ("cpu", "float32")]` in `whisper_candidates()`, and guarded `Cancelled` status updates when `"done"`.
+  - `viralcut/custom_fonts.py`: switched `_SYNC_LOCK` to `RLock()`, guarded `save()`/`delete()`, filtered with `.is_file()`, and widened `_FAMILY_SAFE` for `.+`.
+  - `viralcut/custom_downloader.py`: switched `pick_best_format()` quality ranking/filtering to short-side resolution (`min(width, height)`) for vertical videos.
+  - `viralcut/custom_cleanup.py`: switched `_dir_size()` to `os.scandir`, added `strict=True` DB error guards in `run_cleanup()`, excluded `cancelled`/`error` stale clips from `_active_project_ids()`, skipped scanning `MODELS_DIR` during cleanup, and cleared dangling `source` after removing eco-mode `audio.*`.
+  - `viralcut/custom_debug.py`: skipped `--query-compute-apps` when no tracked PIDs exist with a 15s missing cooldown, added `invalidate_idle_whisper()`, used `db.list_active_projects_brief(8)`, and called `render.hw_cached()` in `snapshot()`.
+  - `web/custom_settings.js` & `web/custom_settings.css`: fixed blank preset labels (`label`/`desc`), isolated `.vc-settings-panel`/`.vc-settings-body` classes, preserved non-dropdown backend values, added keyboard a11y + fetch dedupe, and coordinated modals via `window.vcCloseAnyModal`.
+  - `web/custom_whisper.js` & `web/custom_debug.js`: added `reqSeq`/action locks + in-place download progress patching; skipped redundant DOM rebuilds when unchanged or while pointer-pressed in Inspector.
+- **Modified upstream files**:
+  - `viralcut/subtitles.py`: forwarded `free_pos` to `_pos_tag()` fixing `NameError` for `sub_position="middle"`.
+  - `viralcut/analyze.py`: cached compiled regexes, used substring search (`_count_substrings`) for `EMOTION_RU`/`EMOTION_EN`, `bisect` on `scenes`, deduplicated keyword sets in `find_segments()`, zero-copy `sliding_window_view` + cached Hann/FFT masks, removed dead `frame_ok`, and streamed `Popen` `scene_changes()` with audio suffix skip, `-frames:v`, and per-line `showinfo` `pts_time` alignment.
+  - `viralcut/utils.py`, `viralcut/reframe.py`, `viralcut/render.py`, `viralcut/pip.py`: bounded stat-keyed `_PROBE_CACHE`, `270°` rotation swap, named audio channels, `wave` duration fast-path, odd-byte `iter_audio_mono()` carryover; even `crop_w`/`crop_h` + `grab()`/`retrieve()` frame skipping; apostrophe-safe `_esc()`, `-vn` loudness measurement, even vertical scaling + 4x downscaled `_bg_chain()` blur, clamped `audio_track`, auto GPU-stall CPU fallback; locked `_detector()` and atomic `ensure_mask()`.
+  - `viralcut/cpu_limit.py`, `viralcut/gpu_pref.py`, `viralcut/settings.py`, `viralcut/resources.py`, `viralcut/system_stats.py`: typed `kernel32` Win32 Job API + clean `100%`/error cleanup + POSIX lock; Win32 `"auto"` registry cleanup keeping `applied=False`; stat-keyed `settings._load()` cache + `finally:` close before `unlink`; locked `system_stats`, `winreg` context managers, fixed `cpu_percent()` `0.0%` caching.
+  - `viralcut/ytdlp_bin.py`, `viralcut/downloader.py`, `viralcut/transcribe.py`, `viralcut/ai.py`, `viralcut/assistant_actions.py`, `viralcut/agent.py`, `viralcut/diagnostics.py`, `desktop/main.py`: lock/timeout/pipe cleanup + `language` forwarding; moved model download outside `_MODEL_LOCK`, fast WAV slicing in `_cut_window()`, real chunk exception propagation; `_validate_http_url()`, `JSONDecoder.raw_decode`, `end <= start` guard; synced `_style_fields()`/`_start_cut()`; preserved `model` in `agent.py`; last-session-scoped `diagnostics.py`; containment checks + process/handle cleanup in `desktop/main.py`.
+  - `viralcut/db.py`, `viralcut/live.py`, `viralcut/jobs.py`, `viralcut/pipeline.py`, `viralcut/main.py`: fast brief queries and terminal-status guards; live single-segment 404/HLS-reset/cancel resilience and single `times.jsonl` parse; `_clip_running_projects` tracking; sync upload threadpool + atomic/cached ZIP export + cancel/terminal checks; updated `app.js` + `styles.css` (CSS brace fixes, `loadAudioTracks()` wiring, `loadAiStatus()` sync, lazy clip video decoding, sidebar/`#clipsArea` signatures, modal lifecycle, HUD/system polling efficiency).
+  - `tests/test_custom_features.py`: added `OptimizationAndAuditRegressionTest` (8 regression tests).
+- **Verification**:
+  - `node --check web/app.js; node --check web/custom_whisper.js; node --check web/custom_settings.js; node --check web/custom_debug.js` (exit code 0).
+  - `python -m unittest tests.test_custom_features tests.test_render tests.test_analyze tests.test_reframe tests.test_agent tests.test_ai tests.test_assistant tests.test_assistant_actions tests.test_cut_pauses tests.test_diagnostics tests.test_download_resilience tests.test_edge_cases tests.test_gpu_pick tests.test_language_guard tests.test_limits_gpu tests.test_manual_clip tests.test_reactions tests.test_settings tests.test_ui_functions -v` (`Ran 262 tests in 92.315s`, `OK (skipped=7)`).
+
 <!-- Template for future changes:
 ## [Feature / Fix Name]
 - **Goal**: Why this change exists and expected behavior.

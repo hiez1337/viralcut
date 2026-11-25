@@ -43,6 +43,7 @@ def _spawn() -> Dict[str, Any]:
         return resources.spawn_kwargs()
     except Exception:  # noqa: BLE001
         return {"creationflags": 0x08000000} if _sys.platform == "win32" else {}
+_STATS_LOCK = threading.Lock()
 _LAST_CPU: List[Tuple[float, float]] = []
 _LAST_VALUE: List[float] = [0.0]
 _LAST_TS: List[float] = [0.0]
@@ -124,46 +125,53 @@ def cpu_percent(force: bool = False) -> Optional[float]:
     разница счётчиков может быть нулевой, и виджет мигал бы «н/д».
     """
     now = time.monotonic()
-    if not force and _LAST_VALUE[0] and now - _LAST_TS[0] < 0.25:
-        return _LAST_VALUE[0]
+    with _STATS_LOCK:
+        if not force and _LAST_TS[0] > 0.0 and now - _LAST_TS[0] < 0.25:
+            return _LAST_VALUE[0]
     ticks = _cpu_ticks()
     if ticks is None:
         return None
     busy, total = ticks
-    if not _LAST_CPU:
-        _LAST_CPU.append((busy, total))
+    with _STATS_LOCK:
+        need_sample = not _LAST_CPU
+        if need_sample:
+            _LAST_CPU.append((busy, total))
+    if need_sample:
         time.sleep(0.12)
         ticks = _cpu_ticks()
         if ticks is None:
             return None
         busy, total = ticks
-    prev_busy, prev_total = _LAST_CPU[0]
-    _LAST_CPU[0] = (busy, total)
-    d_total = total - prev_total
-    d_busy = busy - prev_busy
-    if d_total <= 0:
-        # дельта нулевая — оцениваем по средней нагрузке на ядро
-        try:
-            value = round(min(100.0, os.getloadavg()[0] / max(1, os.cpu_count() or 1) * 100), 1)
-        except Exception:
-            value = _LAST_VALUE[0] or 0.0
+    with _STATS_LOCK:
+        prev_busy, prev_total = _LAST_CPU[0]
+        _LAST_CPU[0] = (busy, total)
+        d_total = total - prev_total
+        d_busy = busy - prev_busy
+        if d_total <= 0:
+            # дельта нулевая — оцениваем по средней нагрузке на ядро
+            try:
+                value = round(min(100.0, os.getloadavg()[0] / max(1, os.cpu_count() or 1) * 100), 1)
+            except Exception:
+                value = _LAST_VALUE[0] or 0.0
+            _LAST_TS[0] = now
+            return value
+        value = round(max(0.0, min(100.0, d_busy / d_total * 100)), 1)
+        _LAST_VALUE[0] = value
         _LAST_TS[0] = now
         return value
-    value = round(max(0.0, min(100.0, d_busy / d_total * 100)), 1)
-    _LAST_VALUE[0] = value
-    _LAST_TS[0] = now
-    return value
 
 
 # --- Память ------------------------------------------------------------------
 
 def memory(force: bool = False) -> Dict[str, Any]:
     now = time.monotonic()
-    if not force and _MEM_CACHE.get("value") and now - _MEM_CACHE.get("ts", 0.0) < 1.0:
-        return dict(_MEM_CACHE["value"])
+    with _STATS_LOCK:
+        if not force and _MEM_CACHE.get("value") and now - _MEM_CACHE.get("ts", 0.0) < 1.0:
+            return dict(_MEM_CACHE["value"])
     result = _memory_uncached()
-    _MEM_CACHE["value"] = result
-    _MEM_CACHE["ts"] = now
+    with _STATS_LOCK:
+        _MEM_CACHE["value"] = result
+        _MEM_CACHE["ts"] = now
     return dict(result)
 
 
@@ -401,25 +409,23 @@ def _windows_adapters() -> List[str]:
     try:
         import winreg  # type: ignore[import-not-found]
 
-        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                              r"SYSTEM\CurrentControlSet\Control\Video")
-        index = 0
-        while True:
-            try:
-                guid = winreg.EnumKey(root, index)
-            except OSError:
-                break
-            index += 1
-            try:
-                child = winreg.OpenKey(root, guid + r"\0000")
-                value, _ = winreg.QueryValueEx(child, "DriverDesc")
-                child.Close()
-            except OSError:
-                continue
-            name = str(value or "").strip()
-            if name and not _VIRTUAL_GPU.search(name) and name not in names:
-                names.append(name)
-        root.Close()
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SYSTEM\CurrentControlSet\Control\Video") as root:
+            index = 0
+            while True:
+                try:
+                    guid = winreg.EnumKey(root, index)
+                except OSError:
+                    break
+                index += 1
+                try:
+                    with winreg.OpenKey(root, guid + r"\0000") as child:
+                        value, _ = winreg.QueryValueEx(child, "DriverDesc")
+                except OSError:
+                    continue
+                name = str(value or "").strip()
+                if name and not _VIRTUAL_GPU.search(name) and name not in names:
+                    names.append(name)
     except Exception:  # noqa: BLE001 — реестр недоступен: работаем без списка
         return []
     return names
@@ -430,10 +436,10 @@ def _windows_primary_name() -> str:
     try:
         import winreg  # type: ignore[import-not-found]
 
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                             r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WinSAT")
-        value, _ = winreg.QueryValueEx(key, "PrimaryAdapterString")
-        return str(value).strip()
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                            r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\WinSAT") as key:
+            value, _ = winreg.QueryValueEx(key, "PrimaryAdapterString")
+            return str(value).strip()
     except Exception:  # noqa: BLE001
         return ""
 
@@ -607,7 +613,9 @@ def _gpu_windows() -> Dict[str, Any]:
     # Дискретная NVIDIA — сразу nvidia-smi: она отдаёт точное имя и загрузку
     # именно этой карты, а не сумму по всем адаптерам (на ноутбуках PDH
     # показывает встроенную, которая рисует рабочий стол).
+    tried_nvidia = False
     if discrete and preference != "integrated" and _gpu_vendor(name) == "nvidia":
+        tried_nvidia = True
         smi = _gpu_nvidia()
         if smi.get("percent") is not None:
             smi["vendor"] = "nvidia"
@@ -640,7 +648,7 @@ def _gpu_windows() -> Dict[str, Any]:
     if now - _GPU_FAIL_TS[0] < 30.0:
         return {"percent": None, "name": name, "vendor": _gpu_vendor(name),
                 "source": "none", "discrete": discrete, "adapters": adapters}
-    smi = _gpu_nvidia()
+    smi = {} if tried_nvidia else _gpu_nvidia()
     if smi.get("percent") is not None:
         smi["vendor"] = "nvidia"
         smi["source"] = "nvidia-smi"

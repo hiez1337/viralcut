@@ -9,12 +9,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from fastapi import HTTPException
 
 from viralcut import (
+    ai,
+    analyze,
     config,
+    cpu_limit,
     custom_cleanup,
     custom_debug,
     custom_downloader,
@@ -26,8 +30,11 @@ from viralcut import (
     errors,
     jobs,
     main,
+    pip,
     pipeline,
+    reframe,
     render,
+    subtitles,
     transcribe,
     updater,
     utils,
@@ -869,6 +876,164 @@ class MergeRegressionFixesTest(unittest.TestCase):
 
         with self.assertRaises(Cancelled):
             render._run_encode([sys.executable, "-c", script], 5.0, cancel_cb)
+
+
+class OptimizationAndAuditRegressionTest(unittest.TestCase):
+    def test_subtitles_middle_position_and_free_pos(self):
+        words = [{"word": "Привет", "start": 0.0, "end": 0.5}]
+        ass_mid = subtitles.build_ass(words, 0.0, 1.0, position="middle")
+        self.assertIn(r"\an5\pos(540,960)", ass_mid)
+        ass_free = subtitles.build_ass(words, 0.0, 1.0, position="middle", free_pos=[0.25, 0.75])
+        self.assertIn(r"\an5\pos(270,1440)", ass_free)
+
+    def test_whisper_candidates_maps_float16_on_cpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(custom_whisper, "_data_dir", return_value=Path(tmp)):
+                custom_whisper.set_whisper_settings({"device": "cpu", "compute_type": "float16"})
+                candidates = custom_whisper.whisper_candidates()
+                self.assertEqual(candidates, [("cpu", "int8"), ("cpu", "float32")])
+
+    def test_utils_probe_270_rotation_and_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            media = Path(tmp) / "vert.mp4"
+            media.write_bytes(b"0")
+            ffmpeg_out = (
+                "Duration: 00:00:12.00, start: 0.000000, bitrate: 1000 kb/s\n"
+                "  Stream #0:0(und): Video: h264, yuv420p, 1920x1080, 30 fps\n"
+                "    displaymatrix: rotation of 270.00 degrees\n"
+                "  Stream #0:1(eng): Audio: aac, 48000 Hz, stereo\n"
+            )
+            with mock.patch.object(utils, "run", return_value=SimpleNamespace(stderr=ffmpeg_out)) as m_run:
+                first = utils.probe(media)
+                second = utils.probe(media)
+            self.assertEqual(m_run.call_count, 1)
+            self.assertEqual(first["width"], 1080)
+            self.assertEqual(first["height"], 1920)
+            self.assertEqual(first["rotation"], 270)
+            self.assertEqual(second["width"], 1080)
+
+    def test_analyze_audio_only_skip_and_emotion_substrings(self):
+        with mock.patch.object(analyze.subprocess, "Popen") as m_popen:
+            self.assertEqual(analyze.scene_changes(Path("track.wav")), [])
+            m_popen.assert_not_called()
+        self.assertEqual(analyze._count_substrings("Полный ШОК и катастрофа!", analyze.EMOTION_RU), 2)
+
+    def test_reframe_even_crop_dims(self):
+        import cv2
+        import numpy as np
+
+        ts_seq = iter([0.0, 500.0])
+        frames_left = [2]
+
+        class _FakeCap:
+            def isOpened(self):
+                return True
+
+            def get(self, prop):
+                if prop == cv2.CAP_PROP_FPS:
+                    return 30.0
+                if prop == cv2.CAP_PROP_POS_MSEC:
+                    return next(ts_seq, 2500.0)
+                return 0.0
+
+            def set(self, *_args):
+                return True
+
+            def grab(self):
+                if frames_left[0] <= 0:
+                    return False
+                frames_left[0] -= 1
+                return True
+
+            def retrieve(self):
+                return True, np.zeros((1921, 1081, 3), dtype=np.uint8)
+
+            def release(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "odd.mp4"
+            src.write_bytes(b"0")
+            with mock.patch.object(reframe.utils, "probe", return_value={
+                "width": 1081, "height": 1921, "duration": 2.0, "fps": 30.0, "has_audio": True,
+            }), mock.patch.object(cv2, "VideoCapture", return_value=_FakeCap()), \
+                 mock.patch.object(reframe, "_make_detector", return_value=("haar", None)), \
+                 mock.patch.object(reframe, "_detect", return_value=[]):
+                plan = reframe.build_crop_path(src, 0.0, 2.0, aspect="9:16")
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan["crop_w"] % 2, 0)
+        self.assertEqual(plan["crop_h"] % 2, 0)
+        self.assertLessEqual(plan["crop_w"], 1081)
+        self.assertLessEqual(plan["crop_h"], 1921)
+
+    def test_ai_normalize_plan_and_url_scheme(self):
+        with self.assertRaises(ai.AIError):
+            ai._validate_http_url("file:///etc/passwd")
+        with self.assertRaises(ai.AIError):
+            ai._validate_http_url("ftp://example.com/v1")
+        self.assertEqual(ai._validate_http_url("https://api.example.com/v1/"), "https://api.example.com/v1")
+        out = ai._normalize_plan(
+            [{"start": 20.0, "end": 10.0, "title": "bad"},
+             {"start": 5.0, "end": 25.0, "title": "good"}],
+            duration=100.0, min_dur=15.0, max_dur=60.0, count=5,
+        )
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["title"], "good")
+
+    def test_render_esc_quotes_and_pip_ensure_mask_atomic(self):
+        escaped = render._esc(Path("C:/o'reilly/sub.ass"))
+        self.assertIn("\\:", escaped)
+        self.assertIn("'\\''", escaped)
+        with tempfile.TemporaryDirectory() as tmp:
+            def _fake_run(cmd, **_kwargs):
+                Path(cmd[-1]).write_bytes(b"PNGDATA")
+                return SimpleNamespace(returncode=0, stderr="")
+
+            with mock.patch.object(config, "DATA_DIR", Path(tmp)), \
+                 mock.patch.object(pip.utils, "run", side_effect=_fake_run):
+                mask = pip.ensure_mask(64, 16)
+            self.assertIsNotNone(mask)
+            self.assertTrue(mask.is_file())
+            temps = [p.name for p in mask.parent.iterdir() if p.name.startswith(".mask_")]
+            self.assertEqual(temps, [])
+
+    def test_cpu_limit_windows_clear_on_100(self):
+        rate_calls = []
+        assign_calls = []
+
+        class _FakeKernel32:
+            def CreateJobObjectW(self, *_args):
+                return 777
+
+            def GetCurrentProcess(self):
+                return 1
+
+            def SetInformationJobObject(self, _job, _cls, ptr, _size):
+                info = ptr._obj
+                rate_calls.append((int(info.ControlFlags), int(info.CpuRate)))
+                return 1
+
+            def AssignProcessToJobObject(self, _job, _proc):
+                assign_calls.append(1)
+                return 1
+
+            def CloseHandle(self, _handle):
+                return 1
+
+        saved_state = dict(cpu_limit._state)
+        try:
+            cpu_limit._state.update({"applied": None, "throttler": None, "job": None, "job_assigned": False})
+            with mock.patch.object(sys, "platform", "win32"), \
+                 mock.patch.object(cpu_limit, "_k32", return_value=_FakeKernel32()):
+                self.assertEqual(cpu_limit.apply(50), 50)
+                self.assertEqual(cpu_limit.apply(100), 100)
+        finally:
+            cpu_limit._state.clear()
+            cpu_limit._state.update(saved_state)
+        self.assertEqual(len(rate_calls), 2)
+        self.assertNotEqual(rate_calls[0][0], 0)
+        self.assertEqual(rate_calls[1], (0, 0))
+        self.assertEqual(len(assign_calls), 1)
 
 
 if __name__ == "__main__":

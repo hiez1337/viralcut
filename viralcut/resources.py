@@ -47,21 +47,27 @@ def _env_int(name: str, default: int, low: int = 1, high: int = 64) -> int:
         return default
 
 
+_CACHE_LOCK = threading.Lock()
+
+
 def invalidate() -> None:
     """Сбросить кэш мощности: вызывается после сохранения настроек."""
-    _POWER_CACHE["ts"] = 0.0
+    with _CACHE_LOCK:
+        _POWER_CACHE["ts"] = 0.0
 
 
 def power() -> int:
     """Мощность 0..100: 0 — экономно, 100 — максимум (по умолчанию 50)."""
     now = time.monotonic()
-    if now - float(_POWER_CACHE.get("ts") or 0.0) < _POWER_TTL:
-        return int(_POWER_CACHE["value"])
+    with _CACHE_LOCK:
+        if now - float(_POWER_CACHE.get("ts") or 0.0) < _POWER_TTL:
+            return int(_POWER_CACHE["value"])
     env = os.environ.get("VIRALCUT_POWER")
     if env is not None:
         try:
             value = max(0, min(100, int(env)))
-            _POWER_CACHE.update({"value": value, "ts": now})
+            with _CACHE_LOCK:
+                _POWER_CACHE.update({"value": value, "ts": now})
             return value
         except ValueError:
             pass
@@ -73,7 +79,8 @@ def power() -> int:
         value = max(0, min(100, int(raw)))
     except Exception:  # noqa: BLE001 — настройки недоступны: работаем по умолчанию
         value = 50
-    _POWER_CACHE.update({"value": value, "ts": now})
+    with _CACHE_LOCK:
+        _POWER_CACHE.update({"value": value, "ts": now})
     return value
 
 
@@ -88,7 +95,7 @@ def cpu_share() -> float:
         try:
             return max(0.25, min(1.0, int(env) / 100.0))
         except ValueError:
-            return 1.0
+            pass
     try:
         from . import settings
 

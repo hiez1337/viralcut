@@ -19,6 +19,7 @@ _clip_pool = ThreadPoolExecutor(max_workers=max(1, resources.max_render_workers(
 _clip_gate = resources.ConcurrencyGate(resources.render_workers)
 _lock = threading.RLock()
 _clip_running: set[str] = set()
+_clip_running_projects: Dict[str, str] = {}
 _agent_edits: list[Dict[str, Any]] = []
 _AGENT_HISTORY_LIMIT = 50
 
@@ -49,6 +50,10 @@ def active_project_ids() -> list[str]:
     with _streams_lock:
         for pid, thread in _streams.items():
             if thread.is_alive() and pid not in ids:
+                ids.append(pid)
+    with _lock:
+        for pid in _clip_running_projects.values():
+            if pid and pid not in ids:
                 ids.append(pid)
     return ids
 
@@ -152,7 +157,9 @@ def submit_process(pid: str) -> None:
 
 
 def submit_rerender(clip_id: str, payload: Dict[str, Any], *,
-                    agent_edit: bool = False, undo: Dict[str, Any] | None = None) -> bool:
+                    agent_edit: bool = False, undo: Dict[str, Any] | None = None,
+                    restore_project_status: Optional[str] = None,
+                    restore_project_stage: Optional[str] = None) -> bool:
     with _lock:
         if clip_id in _clip_running:
             return False
@@ -161,8 +168,24 @@ def submit_rerender(clip_id: str, payload: Dict[str, Any], *,
             return False
         db.update_clip(clip_id, status="rendering", error=None)
         _clip_running.add(clip_id)
+        _clip_running_projects[clip_id] = str(previous["project_id"])
+
+    def _restore_project_if_needed(failed_msg: Optional[str] = None) -> None:
+        if not restore_project_status:
+            return
+        pid = str(previous["project_id"])
+        if any(p == pid for cid, p in _clip_running_projects.items() if cid != clip_id):
+            return
+        cur = db.get_project(pid)
+        if cur and cur.get("status") == "running":
+            if failed_msg and restore_project_status != "done":
+                db.update_project(pid, status="error", error=failed_msg[:400], stage="Ошибка")
+            else:
+                db.update_project(pid, status=restore_project_status,
+                                  stage=restore_project_stage or "Готово", error=None)
 
     def work() -> None:
+        err_msg: Optional[str] = None
         try:
             with _clip_gate:
                 if undo is None:
@@ -196,9 +219,10 @@ def submit_rerender(clip_id: str, payload: Dict[str, Any], *,
                     else:
                         _agent_edits[:] = [event for event in _agent_edits if event["id"] != clip_id]
         except Exception as exc:  # noqa: BLE001
+            err_msg = str(exc)[:500]
             previous_ready = (previous["status"] == "ready" and previous.get("path")
                               and Path(previous["path"]).is_file())
-            db.update_clip(clip_id, status="ready" if previous_ready else "error", error=str(exc)[:500])
+            db.update_clip(clip_id, status="ready" if previous_ready else "error", error=err_msg)
             with _lock:
                 latest = next((event for event in reversed(_agent_edits)
                                if event["id"] == clip_id), None)
@@ -210,6 +234,8 @@ def submit_rerender(clip_id: str, payload: Dict[str, Any], *,
         finally:
             with _lock:
                 _clip_running.discard(clip_id)
+                _clip_running_projects.pop(clip_id, None)
+                _restore_project_if_needed(err_msg)
 
     _clip_pool.submit(work)
     return True

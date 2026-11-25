@@ -113,6 +113,11 @@ def _get_model(
         else custom_whisper.get_active_model()
     )
     use_long_slot = bool(long_audio and sys.platform == "darwin")
+    model_ref = custom_whisper.resolve_model_ref(target_model, WHISPER_LOCAL_DIR)
+    if model_ref == target_model and not custom_whisper.is_model_cached(target_model):
+        # Скачиваем до захвата _MODEL_LOCK, чтобы не блокировать настройки Whisper на минуты
+        custom_whisper.ensure_model_downloaded(target_model, on_progress=on_progress)
+
     with _MODEL_LOCK:
         if use_long_slot and _MODEL_LONG is not None and _MODEL_LONG_NAME == target_model:
             return _MODEL_LONG
@@ -128,10 +133,6 @@ def _get_model(
             gc.collect()
 
         from faster_whisper import WhisperModel
-
-        model_ref = custom_whisper.resolve_model_ref(target_model, WHISPER_LOCAL_DIR)
-        if model_ref == target_model and not custom_whisper.is_model_cached(target_model):
-            custom_whisper.ensure_model_downloaded(target_model, on_progress=on_progress)
 
         candidates = custom_whisper.whisper_candidates(use_long_slot, WHISPER_DEVICE, WHISPER_COMPUTE)
         custom_debug.record_whisper(
@@ -441,9 +442,31 @@ def _fix_language_mismatch(model, wav: Path, workdir: Path, segments: List[Dict[
 
 
 def _cut_window(src: Path, dst: Path, start: float, end: float) -> bool:
-    """Вырезает фрагмент аудио для повторной проверки."""
-    cmd = [ffmpeg(), "-y", "-v", "error", "-ss", f"{max(0.0, start):.3f}",
-           "-to", f"{max(start + 0.2, end):.3f}", "-i", str(src),
+    """Вырезает фрагмент аудио для повторной проверки (на WAV — без запуска ffmpeg)."""
+    s0 = max(0.0, float(start))
+    s1 = max(s0 + 0.2, float(end))
+    if src.suffix.lower() == ".wav":
+        try:
+            import wave
+
+            with wave.open(str(src), "rb") as rf:
+                if rf.getnchannels() == 1 and rf.getsampwidth() == 2 and rf.getframerate() == 16000:
+                    total = rf.getnframes()
+                    i0 = max(0, min(total, int(round(s0 * 16000))))
+                    i1 = max(i0, min(total, int(round(s1 * 16000))))
+                    if i1 - i0 > 256:
+                        rf.setpos(i0)
+                        frames = rf.readframes(i1 - i0)
+                        with wave.open(str(dst), "wb") as wf:
+                            wf.setnchannels(1)
+                            wf.setsampwidth(2)
+                            wf.setframerate(16000)
+                            wf.writeframes(frames)
+                        return dst.exists() and dst.stat().st_size > 512
+        except Exception:
+            pass
+    cmd = [ffmpeg(), "-y", "-v", "error", "-ss", f"{s0:.3f}",
+           "-to", f"{s1:.3f}", "-i", str(src),
            "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dst)]
     result = utils.run(cmd)
     return result.returncode == 0 and dst.exists() and dst.stat().st_size > 512
@@ -475,7 +498,7 @@ def _recheck(model, wav: Path, workdir: Path, segments: List[Dict[str, Any]],
             prompt = (context + " " + ASR_PROMPT)[-400:]
             try:
                 parts, _ = _decode(model, clip, language, False, prompt=prompt,
-                                   beam=BEAM_SIZE, temperature=[0.0], condition=False)
+                                   beam=None, temperature=[0.0], condition=False)
                 new_text = " ".join(p.text.strip() for p in parts).strip()
                 payloads = [_segment_payload(p, max(0.0, seg["start"] - 0.30)) for p in parts]
             except Exception:  # noqa: BLE001
@@ -607,6 +630,7 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                 probe_language = detected_language
                 print(f"[whisper] язык: {detected_language} ({language_probability:.2f}) "
                       f"— по фрагментам с речью", file=sys.stderr, flush=True)
+        last_span_exc: Optional[Exception] = None
         for index, (path, offset, length) in enumerate(spans):
             if not path.exists():
                 traceback.print_exc()
@@ -641,7 +665,8 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                         print(f"[whisper] подозрительный язык {t_lang} ({t_prob:.2f}) на первом фрагменте пропущен", file=sys.stderr)
             except Cancelled:
                 raise
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                last_span_exc = exc
                 traceback.print_exc()
                 continue
             if len(spans) > 1 and on_progress:
@@ -649,6 +674,8 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
                             f"Распознавание речи · часть {index + 1} из {len(spans)}")
 
         if not out:
+            if last_span_exc is not None:
+                raise TranscriptionError(f"Ошибка распознавания речи: {str(last_span_exc)[:300]}") from last_span_exc
             raise NoSpeechError("Речь не распознана: возможно, в видео нет голоса.")
 
         # Второй проход по спорным местам — только когда аудио не разрезано на части.
@@ -678,6 +705,12 @@ def transcribe(media: Path, workdir: Path, language: Optional[str] = None,
         try:
             wav.unlink(missing_ok=True)
         except OSError:
+            pass
+        try:
+            from . import custom_debug
+
+            custom_debug.record_whisper(model=target_model, status="idle")
+        except Exception:
             pass
 
     out.sort(key=lambda s: s["start"])

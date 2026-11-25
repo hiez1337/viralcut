@@ -39,13 +39,21 @@ DEFAULTS: Dict[str, Any] = {
     "agent_mode": False,        # агент: несколько шагов до результата
 }
 _LOCK = threading.Lock()
+_LOAD_CACHE: Dict[str, Any] = {"key": None, "data": None}
 
 
 def _load() -> Dict[str, Any]:
     try:
+        st = SETTINGS_FILE.stat()
+        key = (str(SETTINGS_FILE), st.st_mtime_ns, st.st_size)
+        if _LOAD_CACHE["key"] == key and isinstance(_LOAD_CACHE["data"], dict):
+            return dict(_LOAD_CACHE["data"])
         data = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            return {**DEFAULTS, **data}
+            merged = {**DEFAULTS, **data}
+            _LOAD_CACHE["key"] = key
+            _LOAD_CACHE["data"] = merged
+            return dict(merged)
     except (OSError, ValueError):
         pass
     return dict(DEFAULTS)
@@ -60,7 +68,12 @@ def _save(data: Dict[str, Any]) -> None:
             json.dump(data, pending, ensure_ascii=False, indent=2)
             pending.close()
             os.replace(path, SETTINGS_FILE)
+            _LOAD_CACHE["key"] = None
         finally:
+            try:
+                pending.close()
+            except Exception:  # noqa: BLE001
+                pass
             path.unlink(missing_ok=True)
 
 

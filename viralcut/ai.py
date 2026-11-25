@@ -12,10 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 PROVIDERS: Dict[str, Dict[str, str]] = {
     "deepseek": {
@@ -172,8 +174,16 @@ def status() -> Dict[str, Any]:
     }
 
 
-_MODELS_CACHE: Dict[str, Any] = {"ts": 0.0, "base": "", "data": []}
+_MODELS_LOCK = threading.Lock()
+_MODELS_CACHE: Dict[str, Any] = {"ts": 0.0, "base": "", "key": "", "data": []}
 _MODELS_TTL = 600.0
+
+
+def _validate_http_url(url: str) -> str:
+    parsed = urlparse((url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise AIError("Некорректный URL сервера ИИ (нужен http:// или https://).")
+    return url.strip().rstrip("/")
 
 
 def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any]:
@@ -203,16 +213,20 @@ def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any
         # для custom адрес берём из настроек пользователя
         if provider == "custom":
             conf["base"] = str(saved.get("ai_base") or "").strip().rstrip("/")
-    if force:
-        _MODELS_CACHE["ts"] = 0.0
-    now = time.time()
-    if (not force and _MODELS_CACHE["data"] and _MODELS_CACHE["base"] == conf["base"]
-            and now - float(_MODELS_CACHE["ts"]) < _MODELS_TTL):
-        return {"models": _MODELS_CACHE["data"], "base": conf["base"], "cached": True}
-    if not conf["base"]:
-        raise AIError("Не выбран адрес API. Укажите базовый URL своего сервера.")
-    request = urllib.request.Request(f"{conf['base']}/models", method="GET")
+    base_url = _validate_http_url(conf["base"]) if conf["base"] else ""
     api_key = key(conf)
+    if force:
+        with _MODELS_LOCK:
+            _MODELS_CACHE["ts"] = 0.0
+    now = time.time()
+    with _MODELS_LOCK:
+        if (not force and _MODELS_CACHE["data"] and _MODELS_CACHE["base"] == base_url
+                and _MODELS_CACHE["key"] == api_key
+                and now - float(_MODELS_CACHE["ts"]) < _MODELS_TTL):
+            return {"models": _MODELS_CACHE["data"], "base": base_url, "cached": True}
+    if not base_url:
+        raise AIError("Не выбран адрес API. Укажите базовый URL своего сервера.")
+    request = urllib.request.Request(f"{base_url}/models", method="GET")
     if api_key:
         request.add_header("Authorization", f"Bearer {api_key}")
     try:
@@ -247,11 +261,13 @@ def models(force: bool = False, provider: Optional[str] = None) -> Dict[str, Any
             "description": str(item.get("short_description") or "")[:240],
         })
     result.sort(key=lambda item: (item["owner"], item["id"]))
-    _MODELS_CACHE.update({"ts": now, "base": conf["base"], "data": result})
-    return {"models": result, "base": conf["base"], "cached": False}
+    with _MODELS_LOCK:
+        _MODELS_CACHE.update({"ts": now, "base": base_url, "key": api_key, "data": result})
+    return {"models": result, "base": base_url, "cached": False}
 
 
 def _post(url: str, payload: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+    _validate_http_url(url)
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", "application/json")
@@ -385,19 +401,26 @@ def _transcript_for_prompt(segments: List[Dict[str, Any]]) -> str:
 def _parse_json_clips(text: str) -> List[Dict[str, Any]]:
     """Достаёт JSON из ответа модели: бывает в ```json и с пояснениями вокруг."""
     cleaned = (text or "").strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        if cleaned.lower().startswith("json"):
-            cleaned = cleaned[4:]
     candidates: List[str] = []
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start != -1 and end > start:
-        candidates.append(cleaned[start:end + 1])
-    start = cleaned.find("[")
-    end = cleaned.rfind("]")
-    if start != -1 and end > start:
-        candidates.append(cleaned[start:end + 1])
+    if cleaned.startswith("```"):
+        stripped = cleaned.strip("`")
+        if stripped.lower().startswith("json"):
+            stripped = stripped[4:]
+        candidates.append(stripped.strip())
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(cleaned):
+        if ch in "{[":
+            try:
+                obj, _ = decoder.raw_decode(cleaned, idx)
+                candidates.append(json.dumps(obj))
+                break
+            except ValueError:
+                continue
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        start = cleaned.find(open_ch)
+        end = cleaned.rfind(close_ch)
+        if start != -1 and end > start:
+            candidates.append(cleaned[start:end + 1])
     for raw in candidates:
         try:
             data = json.loads(raw)
@@ -426,9 +449,13 @@ def _normalize_plan(items: List[Dict[str, Any]], duration: float,
             end = float(item.get("end"))
         except (TypeError, ValueError):
             continue
+        if end <= start:
+            continue
         if duration > 0:
             start = max(0.0, min(start, duration - 1.0))
             end = max(0.0, min(end, duration))
+            if end <= start:
+                continue
         if end - start < low:
             end = min(duration or end, start + max(low, 8.0))
         if end - start > high:

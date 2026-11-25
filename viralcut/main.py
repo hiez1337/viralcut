@@ -406,8 +406,13 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
         current.pop("cam", None)
     if body.cam_share is not None:
         current["cam_share"] = max(0.15, min(0.45, float(body.cam_share)))
-    if body.pos:
-        current["pos"] = [max(0.0, min(1.0, float(body.pos[0]))), max(0.0, min(1.0, float(body.pos[1])))]
+    if body.pos is not None:
+        try:
+            if len(body.pos) < 2:
+                raise ValueError("pos needs 2 coordinates")
+            current["pos"] = [max(0.0, min(1.0, float(body.pos[0]))), max(0.0, min(1.0, float(body.pos[1])))]
+        except (TypeError, ValueError, IndexError):
+            raise HTTPException(400, "Неверные координаты окна") from None
     if body.size is not None:
         current["size"] = max(0.12, min(0.45, float(body.size)))
     if body.radius is not None:
@@ -420,15 +425,23 @@ def project_pip_set(pid: str, body: PipIn) -> Dict[str, Any]:
 @app.get("/api/projects/{pid}/frame.jpg")
 def project_frame(pid: str, t: float = 0.0, width: int = 900) -> FileResponse:
     project = db.get_project(pid)
-    if not project or not project.get("source"):
+    source = project.get("source") if project else None
+    if not project or not source or not Path(str(source)).is_file():
         raise HTTPException(404, "Кадр недоступен")
+    t_safe = max(0.0, float(t))
+    w_safe = max(160, min(1920, int(width)))
     workdir = PROJECTS_DIR / pid
-    out = workdir / f"frame_{int(t)}_{width}.jpg"
+    out = workdir / f"frame_{int(round(t_safe * 10))}_{w_safe}.jpg"
     if not out.exists():
+        import threading as _threading
+        tmp = workdir / f".frame_{os.getpid()}_{_threading.get_ident()}.jpg"
         try:
-            render.snapshot(Path(project["source"]), out, t=t, width=width)
+            render.snapshot(Path(source), tmp, t=t_safe, width=w_safe)
+            os.replace(tmp, out)
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(500, f"Не удалось получить кадр: {exc}")
+        finally:
+            tmp.unlink(missing_ok=True)
     return FileResponse(out, media_type="image/jpeg")
 
 
@@ -463,6 +476,8 @@ def settings_set(body: SettingsIn) -> Dict[str, Any]:
     try:
         cpu_limit.apply()
         gpu_pref.apply()
+        if "gpu_preference" in patch or "encoder" in patch:
+            render.reset_hw_encoder()
     except Exception:  # noqa: BLE001
         traceback.print_exc()
     data = app_settings.public(data)
@@ -621,7 +636,7 @@ def system_state() -> Dict[str, Any]:
         "limits": resources.summary(),
         "encoder_fallback": render.cpu_fallback_notice(),
     })
-    data["job"] = system_stats.active_job(db.list_projects(5))
+    data["job"] = system_stats.active_job(db.active_job_summary())
     return data
 
 
@@ -777,13 +792,15 @@ def stream_stop(pid: str) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project or not (project.get("meta") or {}).get("live"):
         raise HTTPException(404, "Стрим не найден")
+    if project.get("status") in ("done", "error", "cancelled"):
+        return {"ok": True}
     live.stop_stream(pid)
     db.update_project(pid, stage="Останавливаю запись…")
     return {"ok": True}
 
 
 @app.post("/api/upload")
-async def upload(file: UploadFile = File(...), options: Optional[str] = Form(None)) -> Dict[str, Any]:
+def upload(file: UploadFile = File(...), options: Optional[str] = Form(None)) -> Dict[str, Any]:
     if not file.filename:
         raise HTTPException(400, "Файл не выбран")
     suffix = Path(file.filename).suffix.lower() or ".mp4"
@@ -808,7 +825,7 @@ async def upload(file: UploadFile = File(...), options: Optional[str] = Form(Non
     try:
         with open(target, "wb") as fh:
             while True:
-                chunk = await file.read(1024 * 1024)
+                chunk = file.file.read(1024 * 1024)
                 if not chunk:
                     break
                 written += len(chunk)
@@ -890,7 +907,8 @@ def project_start(pid: str, body: StartIn = StartIn()) -> Dict[str, Any]:
     options = pipeline.normalize_options(body.options or project.get("options"))
     pipeline.clear_cancel(pid)
     pending = [c for c in db.list_clips(pid) if c["status"] == "pending"]
-    if not (options.get("segments") and pending):
+    seg_mode = bool(options.get("segments") or (project.get("meta") or {}).get("segments_mode"))
+    if not (seg_mode and pending):
         db.clear_clips(pid)
     db.update_project(pid, status="queued", stage="В очереди", progress=0, error=None,
                       options=options)
@@ -903,6 +921,11 @@ def project_cancel(pid: str) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
+    jobs.cancel_pending(pid)
+    if (project.get("meta") or {}).get("live"):
+        from . import live
+
+        live.stop_stream(pid)
     pipeline.request_cancel(pid)
     db.update_project(pid, status="cancelled", stage="Отменено", error=None)
     return {"ok": True}
@@ -951,6 +974,7 @@ def project_delete(pid: str) -> Dict[str, Any]:
     jobs.cancel_pending(pid)
     if (project.get("meta") or {}).get("live"):
         live.stop_stream(pid)
+        live.pop_stop_event(pid)
     if jobs.is_running(pid):
         pipeline.request_cancel(pid)
     db.delete_project(pid)
@@ -986,12 +1010,14 @@ def project_pip_apply(pid: str) -> Dict[str, Any]:
     project = db.get_project(pid)
     if not project:
         raise HTTPException(404, "Проект не найден")
-    clips = [c for c in db.list_clips(pid) if c.get("path")]
+    source = project.get("source")
+    if not source or not Path(str(source)).is_file():
+        raise HTTPException(400, "Исходное видео не найдено на диске")
+    clips = [c for c in db.list_clips(pid) if c.get("status") == "ready" and c.get("path")]
     if not clips:
         raise HTTPException(400, "Нет готовых клипов — сначала запустите нарезку")
-    for clip in clips:
-        jobs.submit_rerender(clip["id"], {})
-    return {"ok": True, "clips": len(clips)}
+    queued = sum(1 for clip in clips if jobs.submit_rerender(clip["id"], {}))
+    return {"ok": True, "clips": queued}
 
 
 @app.post("/api/clips/{cid}/rerender")
@@ -1020,7 +1046,6 @@ def clip_rerender(cid: str, body: ClipEdit) -> Dict[str, Any]:
             raise HTTPException(400, "Конец клипа выходит за пределы записанной части эфира")
     elif not Path(str(project["source"])).exists():
         raise HTTPException(400, "Исходное видео не найдено на диске — перерендер невозможен")
-    payload = _clean_clip_edit(body)
     if not jobs.submit_rerender(cid, payload):
         raise HTTPException(409, "Клип уже пересобирается")
     return {"ok": True, "clip": db.get_clip(cid)}
@@ -1033,7 +1058,10 @@ def project_zip(pid: str) -> FileResponse:
         raise HTTPException(404, "Проект не найден")
     dest = PROJECTS_DIR / pid / f"viralcut_{pid}.zip"
     try:
-        pipeline.export_zip(pid, dest)
+        ready = [c for c in db.list_clips(pid) if c.get("status") == "ready" and c.get("path")]
+        latest_ts = max([float(c.get("updated_at") or 0.0) for c in ready], default=0.0)
+        if not (dest.is_file() and dest.stat().st_size > 22 and dest.stat().st_mtime >= latest_ts):
+            pipeline.export_zip(pid, dest)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, str(exc)) from exc
     return FileResponse(dest, filename="viralcut_clips.zip", media_type="application/zip")

@@ -20,14 +20,19 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import resources
 from .config import DATA_DIR
+from .errors import Cancelled
 
 BIN_DIR = DATA_DIR / "bin"
+_ENSURE_LOCK = threading.Lock()
+_VERSION_CACHE: Dict[str, Any] = {"key": None, "value": ""}
 UPDATE_SECONDS = 7 * 24 * 3600
 RELEASE_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/"
 
@@ -50,54 +55,62 @@ def binary_path() -> Path:
 
 def version() -> str:
     path = binary_path()
-    if not path.exists():
+    try:
+        st = path.stat()
+    except OSError:
         return ""
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _VERSION_CACHE.get("key") == key:
+        return str(_VERSION_CACHE.get("value") or "")
     try:
         out = subprocess.run([str(path), "--version"], capture_output=True, text=True,
                              timeout=20, **_spawn())
-        return (out.stdout or out.stderr or "").strip().splitlines()[0][:40]
+        ver = (out.stdout or out.stderr or "").strip().splitlines()[0][:40]
+        _VERSION_CACHE.update({"key": key, "value": ver})
+        return ver
     except Exception:  # noqa: BLE001
         return ""
 
 
 def _spawn() -> Dict[str, Any]:
-    if sys.platform == "win32":
-        return {"creationflags": 0x08000000}  # CREATE_NO_WINDOW
-    return {}
+    return resources.subprocess_kwargs()
 
 
 def ensure(force: bool = False) -> Optional[Path]:
     """Скачивает/обновляет бинарник. Возвращает путь или None."""
     if not enabled():
         return None
-    path = binary_path()
-    try:
-        if path.exists() and not force:
-            age = time.time() - path.stat().st_mtime
-            if age < UPDATE_SECONDS:
-                return path
-        BIN_DIR.mkdir(parents=True, exist_ok=True)
-        asset, filename = _ASSETS.get(sys.platform, _ASSETS["linux"])
-        url = RELEASE_URL + asset
+    with _ENSURE_LOCK:
+        path = binary_path()
         tmp = path.with_suffix(path.suffix + ".part")
-        request = urllib.request.Request(url, headers={"User-Agent": "ViralCut"})
-        with urllib.request.urlopen(request, timeout=120) as response, open(tmp, "wb") as fh:
-            while True:
-                chunk = response.read(1024 * 512)
-                if not chunk:
-                    break
-                fh.write(chunk)
-        if tmp.stat().st_size < 1024 * 1024:
-            tmp.unlink(missing_ok=True)
+        try:
+            if path.exists() and not force:
+                age = time.time() - path.stat().st_mtime
+                if age < UPDATE_SECONDS:
+                    return path
+            BIN_DIR.mkdir(parents=True, exist_ok=True)
+            asset, filename = _ASSETS.get(sys.platform, _ASSETS["linux"])
+            url = RELEASE_URL + asset
+            request = urllib.request.Request(url, headers={"User-Agent": "ViralCut"})
+            with urllib.request.urlopen(request, timeout=120) as response, open(tmp, "wb") as fh:
+                while True:
+                    chunk = response.read(1024 * 512)
+                    if not chunk:
+                        break
+                    fh.write(chunk)
+            if tmp.stat().st_size < 1024 * 1024:
+                return path if path.exists() else None
+            tmp.replace(path)
+            if sys.platform != "win32":
+                path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            _VERSION_CACHE["key"] = None
+            print(f"[ytdlp-bin] обновлён: {path} ({version()})", file=sys.stderr, flush=True)
+            return path
+        except Exception as exc:  # noqa: BLE001 — запасной движок не должен мешать
+            print(f"[ytdlp-bin] не удалось обновить: {str(exc)[:160]}", file=sys.stderr, flush=True)
             return path if path.exists() else None
-        tmp.replace(path)
-        if sys.platform != "win32":
-            path.chmod(path.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        print(f"[ytdlp-bin] обновлён: {path} ({version()})", file=sys.stderr, flush=True)
-        return path
-    except Exception as exc:  # noqa: BLE001 — запасной движок не должен мешать
-        print(f"[ytdlp-bin] не удалось обновить: {str(exc)[:160]}", file=sys.stderr, flush=True)
-        return path if path.exists() else None
+        finally:
+            tmp.unlink(missing_ok=True)
 
 
 def _cookie_args(browser: Optional[str]) -> List[str]:
@@ -117,7 +130,8 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
              browser: Optional[str] = None,
              progress=None, section: Optional[tuple] = None,
              clients: Optional[List[str]] = None,
-             timeout: float = 1800.0, format_selector: Optional[str] = None) -> Dict[str, Any]:
+             timeout: float = 1800.0, format_selector: Optional[str] = None,
+             language: Optional[str] = None) -> Dict[str, Any]:
     """Скачивает видео запасным бинарником. Бросает RuntimeError при неудаче."""
     path = ensure()
     if not path:
@@ -126,9 +140,13 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     out_tpl = str(dest_dir / "source.%(ext)s")
-    cmd = [str(path), "--no-playlist", "--newline", "--no-warnings",
-           "-f", format_selector or _fmt_for(max_height), "--merge-output-format", "mp4",
-           "-o", out_tpl, "--progress"]
+    cmd = resources.wrap_nice([
+        str(path), "--no-playlist", "--newline", "--no-warnings",
+        "-f", format_selector or _fmt_for(max_height), "--merge-output-format", "mp4",
+        "-o", out_tpl, "--progress",
+    ])
+    if language and language not in ("auto", "orig", "original"):
+        cmd += ["--extractor-args", f"youtube:lang={language}"]
     if format_selector:
         cmd.append("--abort-on-unavailable-fragments")
     if clients:
@@ -145,6 +163,18 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                             errors="replace", bufsize=1, **_spawn())
     tail: List[str] = []
+    timed_out = [False]
+
+    def _kill_on_timeout() -> None:
+        timed_out[0] = True
+        try:
+            proc.kill()
+        except Exception:  # noqa: BLE001
+            pass
+
+    timer = threading.Timer(max(1.0, timeout), _kill_on_timeout)
+    timer.daemon = True
+    timer.start()
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -157,11 +187,23 @@ def download(url: str, dest_dir: Path, max_height: int = 1080,
             if match and progress:
                 progress(min(0.98, float(match.group(1)) / 100.0), f"Скачивание {match.group(1)}%")
         code = proc.wait(timeout=timeout)
+    except Cancelled:
+        raise
     finally:
+        timer.cancel()
         try:
-            proc.kill()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            if proc.stdout is not None:
+                proc.stdout.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if timed_out[0]:
+        raise RuntimeError("yt-dlp не ответил вовремя (таймаут)")
     if code != 0:
         raise RuntimeError((tail[-1] if tail else "yt-dlp завершился с ошибкой")[-300:])
     files = sorted(dest_dir.glob("source.*"))

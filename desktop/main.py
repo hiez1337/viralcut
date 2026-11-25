@@ -152,13 +152,23 @@ class DesktopApi:
     def _reveal(self, path: Path) -> None:
         try:
             if IS_WINDOWS:
-                subprocess.Popen(["explorer", f"/select,{path}"])
+                subprocess.Popen(f'explorer /select,"{path}"')
             elif IS_MACOS:
                 subprocess.Popen(["open", "-R", str(path)])
             else:
                 subprocess.Popen(["xdg-open", str(path.parent)])
         except Exception:
             pass
+
+    @staticmethod
+    def _safe_project_dir(root: Path, project_id: str) -> Optional[Path]:
+        if not project_id or any(sep in project_id for sep in ("/", "\\", "..")):
+            return None
+        base = root.resolve()
+        target = (base / project_id).resolve()
+        if not target.is_relative_to(base) or target == base:
+            return None
+        return target
 
     def choose_folder(self, current: str = "") -> Dict[str, Any]:
         """Диалог выбора папки: пользователь сам решает, куда сохранять."""
@@ -190,14 +200,22 @@ class DesktopApi:
             return {"ok": False, "error": "Исходник ещё не скачан"}
         src = Path(source)
         name = self._safe(project.get("title") or src.stem) + src.suffix
-        target = self._ask_target(name)
+        from viralcut import settings as app_settings
+
+        conf = app_settings.get()
+        preset_dir = conf.get("download_dir") or ""
+        ask = self._ask_enabled() and (conf.get("ask_folder", True) or not preset_dir)
+        target = self._ask_target(name) if ask else "unavailable"
         if target is None:
             return {"ok": False, "cancelled": True}
         if target == "unavailable":
-            return {"ok": False, "error": "Диалог сохранения недоступен"}
-        dest = target if target.suffix else target.with_suffix(src.suffix)
-        dest = self._unique(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
+            base = Path(preset_dir) if preset_dir else self._downloads()
+            base.mkdir(parents=True, exist_ok=True)
+            dest = self._unique(base / name)
+        else:
+            dest = target if target.suffix else target.with_suffix(src.suffix)
+            dest = self._unique(dest)
+            dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
         self._reveal(dest)
         return {"ok": True, "path": str(dest), "folder": str(dest.parent)}
@@ -237,34 +255,41 @@ class DesktopApi:
         from viralcut import db, pipeline
         from viralcut.config import PROJECTS_DIR
 
+        proj_dir = self._safe_project_dir(PROJECTS_DIR, project_id)
+        if proj_dir is None:
+            return {"ok": False, "error": "Некорректный идентификатор проекта"}
         project = db.get_project(project_id)
         if not project:
             return {"ok": False, "error": "Проект не найден"}
-        archive = PROJECTS_DIR / project_id / f"viralcut_{project_id}.zip"
+        archive = proj_dir / f".export_{os.getpid()}_{threading.get_ident()}.zip"
         try:
             pipeline.export_zip(project_id, archive)
         except Exception as exc:  # noqa: BLE001
+            archive.unlink(missing_ok=True)
             return {"ok": False, "error": str(exc)[:300]}
-        name = f"viralcut_{self._safe(project.get('title') or 'clips')}.zip"
-        from viralcut import settings as app_settings
+        try:
+            name = f"viralcut_{self._safe(project.get('title') or 'clips')}.zip"
+            from viralcut import settings as app_settings
 
-        conf = app_settings.get()
-        preset_dir = conf.get("clips_dir") or ""
-        ask = self._ask_enabled() and (conf.get("ask_folder", True) or not preset_dir)
-        target = self._ask_target(name) if ask else "unavailable"
-        if target is None:
-            return {"ok": False, "cancelled": True}
-        if target == "unavailable":
-            base = Path(preset_dir) if preset_dir else self._downloads()
-            base.mkdir(parents=True, exist_ok=True)
-            dest = self._unique(base / name)
-        else:
-            dest = target if target.suffix.lower() == ".zip" else target.with_suffix(".zip")
-            dest = self._unique(dest)
-            dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(archive, dest)
-        self._reveal(dest)
-        return {"ok": True, "path": str(dest), "folder": str(dest.parent)}
+            conf = app_settings.get()
+            preset_dir = conf.get("clips_dir") or ""
+            ask = self._ask_enabled() and (conf.get("ask_folder", True) or not preset_dir)
+            target = self._ask_target(name) if ask else "unavailable"
+            if target is None:
+                return {"ok": False, "cancelled": True}
+            if target == "unavailable":
+                base = Path(preset_dir) if preset_dir else self._downloads()
+                base.mkdir(parents=True, exist_ok=True)
+                dest = self._unique(base / name)
+            else:
+                dest = target if target.suffix.lower() == ".zip" else target.with_suffix(".zip")
+                dest = self._unique(dest)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(archive, dest)
+            self._reveal(dest)
+            return {"ok": True, "path": str(dest), "folder": str(dest.parent)}
+        finally:
+            archive.unlink(missing_ok=True)
 
     def open_url(self, url: str) -> Dict[str, Any]:
         """Открывает внешнюю ссылку в системном браузере (Telegram-канал и т.п.)."""
@@ -284,9 +309,12 @@ class DesktopApi:
     def open_project_folder(self, project_id: str) -> Dict[str, Any]:
         from viralcut.config import PROJECTS_DIR
 
-        folder = PROJECTS_DIR / project_id / "clips"
+        proj_dir = self._safe_project_dir(PROJECTS_DIR, project_id)
+        if proj_dir is None:
+            return {"ok": False, "error": "Некорректный идентификатор проекта"}
+        folder = proj_dir / "clips"
         if not folder.exists():
-            folder = PROJECTS_DIR / project_id
+            folder = proj_dir
         try:
             if IS_WINDOWS:
                 os.startfile(str(folder))  # type: ignore[attr-defined]
@@ -436,12 +464,22 @@ def start_pot_provider(data_dir: Path, vendor: Path, log) -> "subprocess.Popen |
         extra: dict = {}
         if IS_WINDOWS:
             extra["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
-        proc = subprocess.Popen(
-            [str(node), str(server), "--port", str(port)],
-            cwd=str(vendor / "pot"), env=env, stdout=log, stderr=log, **extra,
-        )
+        pot_log = open(data_dir / "pot.log", "a", encoding="utf-8", errors="replace")
+        try:
+            proc = subprocess.Popen(
+                [str(node), str(server), "--port", str(port)],
+                cwd=str(vendor / "pot"), env=env, stdout=pot_log, stderr=pot_log, **extra,
+            )
+        finally:
+            try:
+                pot_log.close()
+            except Exception:
+                pass
         deadline = time.time() + 20
         while time.time() < deadline:
+            if proc.poll() is not None:
+                print(f"POT provider exited early ({proc.returncode})", flush=True)
+                return None
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/ping", timeout=1) as resp:
                     if resp.status == 200:
@@ -452,7 +490,14 @@ def start_pot_provider(data_dir: Path, vendor: Path, log) -> "subprocess.Popen |
             except Exception:
                 time.sleep(0.2)
         print("POT provider did not start in time", flush=True)
-        proc.terminate()
+        try:
+            proc.terminate()
+            proc.wait(timeout=2)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
     except Exception as exc:  # noqa: BLE001
         print(f"POT provider failed: {exc}", flush=True)
     return None
@@ -725,7 +770,7 @@ def main() -> None:
         return
 
     log_path = _prepare_log(data_dir)
-    log = open(log_path, "a", buffering=1, encoding="utf-8")
+    log = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
     sys.stdout = log  # type: ignore[assignment]
     sys.stderr = log  # type: ignore[assignment]
     print(f"\n=== {APP_NAME} start {time.strftime('%Y-%m-%d %H:%M:%S')} ===", flush=True)
@@ -768,7 +813,7 @@ def main() -> None:
     boot("environment готов")
 
     pot_proc = None
-    server = None
+    server_thread: Optional[threading.Thread] = None
     clean_exit = False
 
     def shutdown(*_args: Any) -> None:
@@ -778,6 +823,11 @@ def main() -> None:
                 server.should_exit = True
         except Exception:
             pass
+        if server_thread is not None and server_thread.is_alive():
+            try:
+                server_thread.join(timeout=2)
+            except Exception:
+                pass
         if pot_proc is not None:
             try:
                 pot_proc.terminate()
@@ -813,6 +863,7 @@ def main() -> None:
         server = uvicorn.Server(config)
         boot(f"запуск сервера на порту {port}")
         thread = threading.Thread(target=server.run, name="viralcut-http", daemon=True)
+        server_thread = thread
         thread.start()
 
         if not wait_health(port):

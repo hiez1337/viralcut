@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,9 +45,24 @@ def _to_seconds(h: str, m: str, s: str) -> float:
     return int(h) * 3600 + int(m) * 60 + float(s)
 
 
+_PROBE_LOCK = threading.Lock()
+_PROBE_CACHE: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+_PROBE_CACHE_MAX = 64
+
+
 def probe(path: Path) -> Dict[str, Any]:
     """Достаёт длительность, размеры, fps и наличие звука из вывода ffmpeg."""
-    proc = run([ffmpeg(), "-hide_banner", "-i", str(path)])
+    try:
+        st = path.stat()
+        cache_key = (str(path.resolve()), st.st_mtime_ns, st.st_size)
+    except OSError:
+        cache_key = None
+    if cache_key is not None:
+        with _PROBE_LOCK:
+            cached = _PROBE_CACHE.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+    proc = run([ffmpeg(), "-hide_banner", "-i", str(path)], timeout=30)
     text = proc.stderr or ""
     info: Dict[str, Any] = {"duration": 0.0, "width": 0, "height": 0, "fps": 30.0, "has_audio": False}
     m = _TIME_RE.search(text)
@@ -66,11 +82,16 @@ def probe(path: Path) -> Dict[str, Any]:
     rm = re.search(r"rotation of (-?\d+(?:\.\d+)?) degrees", text)
     if rm:
         angle = abs(float(rm.group(1))) % 360
-        if 75 <= angle <= 105:
+        if 75 <= angle <= 105 or 255 <= angle <= 285:
             info["width"], info["height"] = info["height"], info["width"]
-            info["rotation"] = 90
+            info["rotation"] = 90 if angle <= 105 else 270
     if info["width"] == 0 or info["height"] == 0:
         raise MediaError("Не удалось прочитать видеофайл (повреждён или это не видео).")
+    if cache_key is not None:
+        with _PROBE_LOCK:
+            if len(_PROBE_CACHE) >= _PROBE_CACHE_MAX:
+                _PROBE_CACHE.pop(next(iter(_PROBE_CACHE)))
+            _PROBE_CACHE[cache_key] = dict(info)
     return info
 
 
@@ -91,10 +112,19 @@ def audio_tracks(path: Path) -> List[Dict[str, Any]]:
         mt = re.search(r"\(title: ([^)]+)\)", line)
         if mt:
             title = mt.group(1).strip()
-        channels, stereo = 0, 1 if "stereo" in line else 2
-        mch = re.search(r"(\d+(?:\.\d+)?) (?:ch|stereo|mono)", line)
+        channels = 0.0
+        mch = re.search(r"(?:(\d+(?:\.\d+)?)\s*channels?|(\bmono\b|\bstereo\b|\b5\.1\b|\b7\.1\b))", line)
         if mch:
-            channels = float(mch.group(1))
+            if mch.group(1):
+                channels = float(mch.group(1))
+            elif mch.group(2) == "mono":
+                channels = 1.0
+            elif mch.group(2) == "stereo":
+                channels = 2.0
+            elif mch.group(2) == "5.1":
+                channels = 6.0
+            elif mch.group(2) == "7.1":
+                channels = 8.0
         tracks.append({"index": order, "stream": int(m.group(1)),
                        "language": (m.group(2) or "").lower(),
                        "title": title, "channels": channels or 2})
@@ -104,7 +134,17 @@ def audio_tracks(path: Path) -> List[Dict[str, Any]]:
 
 def media_duration(path: Path) -> float:
     """Длительность любого медиа, включая аудио без видеодорожки."""
-    proc = run([ffmpeg(), "-hide_banner", "-i", str(path)])
+    if path.suffix.lower() == ".wav":
+        try:
+            import wave
+
+            with wave.open(str(path), "rb") as wf:
+                rate = wf.getframerate()
+                if rate > 0:
+                    return wf.getnframes() / float(rate)
+        except Exception:
+            pass
+    proc = run([ffmpeg(), "-hide_banner", "-i", str(path)], timeout=30)
     m = _TIME_RE.search(proc.stderr or "")
     return _to_seconds(*m.groups()) if m else 0.0
 
@@ -171,14 +211,20 @@ def iter_audio_mono(src: Path, sample_rate: int = 16000, *,
     block_bytes -= block_bytes % 4
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                             **subprocess_kwargs())
+    carry = b""
     try:
         while True:
             chunk = proc.stdout.read(block_bytes) if proc.stdout else b""
             if not chunk:
                 break
+            if carry:
+                chunk = carry + chunk
+                carry = b""
             if len(chunk) % 2:
-                chunk = chunk[:-1]  # неполный сэмпл: дочитаем со следующим блоком
-            yield np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
+                carry = chunk[-1:]
+                chunk = chunk[:-1]
+            if chunk:
+                yield np.frombuffer(chunk, dtype=np.int16).astype(np.float32) / 32768.0
     finally:
         try:
             if proc.stdout:

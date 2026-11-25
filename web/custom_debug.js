@@ -14,6 +14,10 @@
   let updateEnabled = false;
   let updateBusy = false;
   let cleanupBusy = null;
+  let pointerDownInBody = false;
+  let prevChipsHtml = "";
+  let prevBodyHtml = "";
+  let prevFootText = "";
 
   let toggleBtn = null;
   let fabBtn = null;
@@ -128,7 +132,7 @@
       if (!window.confirm(msg)) return;
     }
     cleanupBusy = scope;
-    if (lastData) renderData(lastData);
+    if (lastData) renderData(lastData, true);
     try {
       const resp = await fetch("/api/debug/cleanup", {
         method: "POST",
@@ -153,7 +157,7 @@
       }
     } finally {
       cleanupBusy = null;
-      if (lastData) renderData(lastData);
+      if (lastData) renderData(lastData, true);
       if (isOpen && !isPaused) scheduleNext(80);
     }
   }
@@ -226,7 +230,18 @@
     updFootBtn = document.getElementById("vcDbgUpdateFoot");
     const closeBtn = document.getElementById("vcDbgClose");
 
+    bodyEl.addEventListener("pointerdown", () => {
+      pointerDownInBody = true;
+    });
+    const clearPointerHold = () => {
+      pointerDownInBody = false;
+    };
+    bodyEl.addEventListener("pointerup", clearPointerHold);
+    bodyEl.addEventListener("pointercancel", clearPointerHold);
+    bodyEl.addEventListener("pointerleave", clearPointerHold);
+
     bodyEl.addEventListener("click", (e) => {
+      pointerDownInBody = false;
       const btn = e.target.closest("[data-cleanup]");
       if (!btn || btn.disabled) return;
       runCleanup(btn.dataset.cleanup);
@@ -307,7 +322,7 @@
     }
   }
 
-  function renderData(d) {
+  function renderData(d, forceBody = false) {
     lastData = d;
     updateToggleBadges(d);
 
@@ -321,11 +336,15 @@
     const st = d.storage || {};
 
     const encLabel = srv.hw_encoder ? srv.hw_encoder.replace("h264_", "").toUpperCase() : "LIBX264";
-    headChips.innerHTML = `
+    const nextChipsHtml = `
       <span class="vc-dbg-chip mono">PID ${esc(srv.pid || "—")}</span>
       <span class="vc-dbg-chip ${srv.hw_encoder ? "ok" : ""}">${esc(encLabel)}</span>
       <span class="vc-dbg-chip">${esc(srv.render_workers || 1)}× воркер</span>
     `;
+    if (nextChipsHtml !== prevChipsHtml) {
+      headChips.innerHTML = nextChipsHtml;
+      prevChipsHtml = nextChipsHtml;
+    }
 
     const vramUsed = gpu.vram_used_mb;
     const vramTotal = gpu.vram_total_mb;
@@ -460,7 +479,7 @@
       </div>
     `;
 
-    bodyEl.innerHTML = `
+    const nextBodyHtml = `
       <div class="vc-dbg-grid">
         ${hwHtml}
         ${whisperHtml}
@@ -469,8 +488,16 @@
         ${storageHtml}
       </div>
     `;
+    if ((forceBody || !pointerDownInBody) && nextBodyHtml !== prevBodyHtml) {
+      bodyEl.innerHTML = nextBodyHtml;
+      prevBodyHtml = nextBodyHtml;
+    }
     if (footMetaEl) {
-      footMetaEl.textContent = `Аптайм: ${fmtDurSec(srv.uptime_s)} · CPU: ${sys.cpu_count || "—"} · Ctrl+Shift+D · ${isPaused ? "пауза" : "live"}`;
+      const nextFootText = `Аптайм: ${fmtDurSec(srv.uptime_s)} · CPU: ${sys.cpu_count || "—"} · Ctrl+Shift+D · ${isPaused ? "пауза" : "live"}`;
+      if (nextFootText !== prevFootText) {
+        footMetaEl.textContent = nextFootText;
+        prevFootText = nextFootText;
+      }
     }
   }
 

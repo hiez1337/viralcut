@@ -45,18 +45,21 @@ def _log_fonts_dir(fonts_dir: Path) -> None:
 def _esc(path: Path) -> str:
     # экранирование для аргумента фильтра ffmpeg
     p = str(path).replace("\\", "/")
-    p = p.replace(":", "\\:").replace("'", "\\'")
+    p = p.replace(":", "\\:").replace("'", "'\\''")
     return p
 
 
 def _bg_chain(w: int, h: int, focus_x: float = 0.5, sharpen: bool = False,
               src: str = "[0:v]") -> str:
     sharp = ",unsharp=5:5:0.7:5:5:0.0" if sharpen else ""
+    bw = max(16, (w // 4) - ((w // 4) % 2))
+    bh = max(16, (h // 4) - ((h // 4) % 2))
     return (
         f"{src}split=2[bg][fg];"
-        f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-        f"gblur=sigma=26:steps=2,eq=saturation=0.95[bgb];"
-        f"[fg]scale={w}:-2:flags=lanczos{sharp}[fgs];"
+        f"[bg]scale={bw}:{bh}:force_original_aspect_ratio=increase,crop={bw}:{bh},"
+        f"gblur=sigma=6.5:steps=2,eq=saturation=0.95,scale={w}:{h}:flags=bilinear[bgb];"
+        f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease:flags=lanczos,"
+        f"scale=trunc(iw/2)*2:trunc(ih/2)*2{sharp}[fgs];"
         f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2:shortest=1[base]"
     )
 
@@ -399,10 +402,10 @@ def _measure_loudness(source: Path, start: float, duration: float,
                 ";[aconc]loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[out]")
             cmd = [ffmpeg(), "-hide_banner", "-nostats",
                    "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(source),
-                   "-filter_complex", graph, "-map", "[out]", "-f", "null", "-"]
+                   "-vn", "-filter_complex", graph, "-map", "[out]", "-f", "null", "-"]
         else:
             cmd = [ffmpeg(), "-hide_banner", "-nostats", "-ss", f"{start:.3f}",
-                   "-t", f"{duration:.3f}", "-i", str(source),
+                   "-t", f"{duration:.3f}", "-i", str(source), "-vn",
                    "-map", f"0:a:{max(0, int(audio_track))}?", "-af",
                    "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json", "-f", "null", "-"]
         proc = subprocess.run(cmd, capture_output=True, text=True, errors="replace",
@@ -458,6 +461,8 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
         base = clip_start
         input_len = duration
     info = probe(source)
+    if info.get("audio_tracks") and audio_track >= int(info["audio_tracks"]):
+        audio_track = 0
     if info["height"] >= 1000:
         crf = min(crf, 19)
         preset = "veryfast"
@@ -594,7 +599,7 @@ def render_clip(source: Path, clip_start: float, clip_end: float, out_path: Path
             finally:
                 _ENCODE_META.meta = None
             tail_text = "".join(tail)
-            if stop_reason and not (windows_gpu and encoder):
+            if stop_reason and encoder is None:
                 break
             if not stop_reason and code == 0 and staged.is_file() and staged.stat().st_size >= 10000:
                 if on_progress:

@@ -17,7 +17,7 @@ CUSTOM_DIR = DATA_DIR / "fonts"
 RUNTIME_DIR = DATA_DIR / "fonts_runtime"
 META_PATH = CUSTOM_DIR / "fonts.json"
 MAX_BYTES = 30 * 1024 * 1024
-_SYNC_LOCK = threading.Lock()
+_SYNC_LOCK = threading.RLock()
 
 LOWER = "аеоинтсврлкмдупя"
 
@@ -38,7 +38,7 @@ def _write_meta(items: List[Dict[str, Any]]) -> None:
 
 
 def list_custom() -> List[Dict[str, Any]]:
-    return [f for f in _meta() if (CUSTOM_DIR / f.get("file", "")).exists()]
+    return [f for f in _meta() if f.get("file") and (CUSTOM_DIR / str(f["file"])).is_file()]
 
 
 def get(key: str) -> Optional[Dict[str, Any]]:
@@ -115,7 +115,7 @@ def libass_dir() -> Path:
     return sync()
 
 
-_FAMILY_SAFE = re.compile(r"[^A-Za-z0-9 _-]+")
+_FAMILY_SAFE = re.compile(r"[^A-Za-z0-9 ._+-]+")
 
 
 def _clean_family(name: str | None) -> str:
@@ -181,47 +181,49 @@ def save(filename: str, data: bytes) -> Dict[str, Any]:
     suffix = _suffix(filename, data)
     digest = hashlib.sha1(data).hexdigest()[:10]
     key = f"custom_{digest}"
-    existing = get(key)
-    if existing:
-        return existing
-    info = _metrics(data)
-    CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
-    stored = f"{key}{suffix}"
-    (CUSTOM_DIR / stored).write_bytes(data)
-    items = _meta()
-    family = info["family"]
-    labels = {f.get("label") for f in items}
-    label = family
-    n = 2
-    while label in labels:
-        label = f"{family} ({n})"
-        n += 1
-    entry = {
-        "key": key, "label": label, "family": info["family"], "file": stored,
-        "cap": info["cap"], "avg": info["avg"], "has_cyrillic": info["has_cyrillic"],
-        "original": Path(filename or "").name, "css": f"VCCustom_{key}", "custom": True,
-    }
-    items.append(entry)
-    _write_meta(items)
-    sync()
-    return entry
+    with _SYNC_LOCK:
+        existing = get(key)
+        if existing:
+            return existing
+        info = _metrics(data)
+        CUSTOM_DIR.mkdir(parents=True, exist_ok=True)
+        stored = f"{key}{suffix}"
+        (CUSTOM_DIR / stored).write_bytes(data)
+        items = _meta()
+        family = info["family"]
+        labels = {f.get("label") for f in items}
+        label = family
+        n = 2
+        while label in labels:
+            label = f"{family} ({n})"
+            n += 1
+        entry = {
+            "key": key, "label": label, "family": info["family"], "file": stored,
+            "cap": info["cap"], "avg": info["avg"], "has_cyrillic": info["has_cyrillic"],
+            "original": Path(filename or "").name, "css": f"VCCustom_{key}", "custom": True,
+        }
+        items.append(entry)
+        _write_meta(items)
+        sync()
+        return entry
 
 
 def delete(key: str) -> bool:
-    items = _meta()
-    kept = []
-    removed = None
-    for font in items:
-        if font.get("key") == key:
-            removed = font
-        else:
-            kept.append(font)
-    if not removed:
-        return False
-    try:
-        (CUSTOM_DIR / removed.get("file", "")).unlink(missing_ok=True)
-    except OSError:
-        pass
-    _write_meta(kept)
-    sync()
-    return True
+    with _SYNC_LOCK:
+        items = _meta()
+        kept = []
+        removed = None
+        for font in items:
+            if font.get("key") == key:
+                removed = font
+            else:
+                kept.append(font)
+        if not removed:
+            return False
+        try:
+            (CUSTOM_DIR / str(removed.get("file") or "")).unlink(missing_ok=True)
+        except OSError:
+            pass
+        _write_meta(kept)
+        sync()
+        return True

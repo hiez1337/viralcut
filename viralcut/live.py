@@ -250,12 +250,18 @@ class Recorder:
         """Скачивает пачку сегментов параллельно, порядок сохраняется."""
         workers = max(1, min(SEGMENT_WORKERS, len(pending)))
 
-        def fetch(item: Tuple[int, Dict[str, Any]]) -> bytes:
-            return _http_get(item[1]["uri"], timeout=25)
+        def fetch(item: Tuple[int, Dict[str, Any]]) -> Tuple[int, Dict[str, Any], Optional[bytes]]:
+            try:
+                return item[0], item[1], _http_get(item[1]["uri"], timeout=25)
+            except urllib.error.HTTPError as exc:
+                if exc.code in (404, 410):
+                    # Отдельный сегмент мог протухнуть на CDN; не считаем весь эфир оффлайн.
+                    return item[0], item[1], None
+                raise
 
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="live-seg") as pool:
-            blobs = list(pool.map(fetch, pending))
-        return [(seq, seg, blob) for (seq, seg), blob in zip(pending, blobs)]
+            results = list(pool.map(fetch, pending))
+        return [(seq, seg, blob) for seq, seg, blob in results if blob is not None]
 
     def _reconnect(self, playlist_url: Optional[str], exc: Exception) -> Optional[str]:
         self.attempts += 1
@@ -274,10 +280,11 @@ class Recorder:
         playlist_url: Optional[str] = None
         while not self.stop.is_set():
             self.polls += 1
-            if self.polls % 10 == 0 and db.get_project(self.pid) is None:
-                # проект удалили из интерфейса — запись больше не нужна
-                self.stop.set()
-                break
+            if self.polls % 10 == 0:
+                proj = db.get_project(self.pid)
+                if proj is None or proj.get("status") == "cancelled":
+                    self.stop.set()
+                    break
             try:
                 if playlist_url is None:
                     self.status = "connecting"
@@ -287,10 +294,13 @@ class Recorder:
                 text, playlist_url = _media_playlist(playlist_url)
                 self._ensure_init(text, playlist_url)
                 media_seq = _media_sequence(text)
+                segments = _parse_playlist(text, playlist_url)
                 if self.sequence is None:
                     self.sequence = media_seq if media_seq is not None else 0
+                elif media_seq is not None and segments and (media_seq + len(segments)) < self.sequence:
+                    # Стрим перезапустился с новым media-sequence
+                    self.sequence = media_seq
                 self._log_ad_markers(text, self.sequence)
-                segments = _parse_playlist(text, playlist_url)
                 if segments:
                     # связь есть и плейлист разобран — сразу показываем «Запись»,
                     # не дожидаясь, пока скачается стартовый набор сегментов
@@ -358,26 +368,30 @@ class Recorder:
                 playlist_url = self._reconnect(playlist_url, exc)
 
 
-def _seg_spans(workdir: Path, start: float, end: float) -> Tuple[List[Path], float]:
-    """Список сегментов записи, покрывающих [start, end], и время начала первого."""
+def _seg_spans(workdir: Path, start: float, end: float) -> Tuple[List[Path], float, Dict[int, float]]:
+    """Список сегментов записи, покрывающих [start, end], смещение и карта длительностей."""
     segments_dir = workdir / "segments"
     times_path = segments_dir / "times.jsonl"
     entries = []
+    durations: Dict[int, float] = {}
     if times_path.exists():
         for line in times_path.read_text(encoding="utf-8").splitlines():
             try:
                 item = json.loads(line)
-                entries.append((int(item["seq"]), float(item["start"]), float(item["dur"])))
+                seq = int(item["seq"])
+                st = float(item["start"])
+                dur = float(item["dur"])
+                entries.append((seq, st, dur))
+                durations[seq] = dur
             except Exception:
                 continue
     entries.sort(key=lambda e: e[0])
     picked = [e for e in entries if e[1] < end and e[1] + e[2] > start]
-    if not picked:
-        return [], 0.0
-    offset = picked[0][1]
-    paths = [segments_dir / f"{seq:08d}.ts" for seq, _, _ in picked
-             if (segments_dir / f"{seq:08d}.ts").exists()]
-    return paths, offset
+    existing = [(seq, st, segments_dir / f"{seq:08d}.ts") for seq, st, _ in picked
+                if (segments_dir / f"{seq:08d}.ts").exists()]
+    if not existing:
+        return [], 0.0, durations
+    return [p for _, _, p in existing], existing[0][1], durations
 
 
 def _times_map(workdir: Path) -> Dict[int, float]:
@@ -397,7 +411,8 @@ def _times_map(workdir: Path) -> Dict[int, float]:
     return out
 
 
-def _local_playlist(workdir: Path, paths: List[Path], name: str) -> Path:
+def _local_playlist(workdir: Path, paths: List[Path], name: str,
+                    durations: Optional[Dict[int, float]] = None) -> Path:
     """Локальный HLS-плейлист для выбранных сегментов.
 
     Раньше сегменты склеивались протоколом concat: (байт в байт). На fMP4-потоках
@@ -407,7 +422,8 @@ def _local_playlist(workdir: Path, paths: List[Path], name: str) -> Path:
     получаются нужной длины и без сдвига субтитров.
     """
     seg_dir = workdir / "segments"
-    durations = _times_map(workdir)
+    if durations is None:
+        durations = _times_map(workdir)
     target = max([durations.get(int(p.stem), 2.0) for p in paths] + [2.0])
     lines = ["#EXTM3U", "#EXT-X-VERSION:7",
              f"#EXT-X-TARGETDURATION:{int(target) + 1}",
@@ -448,7 +464,7 @@ def _settings(opts: Dict[str, Any]) -> Dict[str, Any]:
         # в эфире по умолчанию показываем весь кадр (рабочее поле), а не кроп
         # по лицу: иначе клип превращается в крупный план стримера
         "aspect": opts.get("aspect", "9:16"),
-        "mode": opts.get("mode", "blur") if opts.get("mode") != "crop" else "crop",
+        "mode": "crop" if opts.get("mode") == "crop" else "blur",
         "subtitles": opts.get("subtitles", True), "accent": opts.get("accent", "yellow"),
         "uppercase": opts.get("uppercase", True), "show_hook": opts.get("show_hook", True),
         "focus_x": 0.5, "sub_size": int(opts.get("sub_size", 118)),
@@ -478,11 +494,12 @@ def _live_duration(pid: str) -> float:
 def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> None:
     """Пока идёт запись — каждое окно распознаётся и из него режутся моменты."""
     workdir = _workdir(pid)
-    language: Optional[str] = None
+    language: Optional[str] = pipeline._whisper_lang(opts)
     processed = 0
     failures = 0
     try:
         while True:
+            _check_live_cancel(pid, stop)
             duration = _live_duration(pid)
             project = db.get_project(pid)
             if project is None:
@@ -516,7 +533,7 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
 
             audio = workdir / f"win_{int(win_start)}.wav"
             try:
-                paths, offset = _seg_spans(workdir, win_start, win_end)
+                paths, offset, durations = _seg_spans(workdir, win_start, win_end)
                 if not paths:
                     raise RuntimeError("сегменты записи ещё не готовы")
                 print(f"[live] extracting {win_start:.0f}-{win_end:.0f}", file=sys.stderr, flush=True)
@@ -524,7 +541,7 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                 db.merge_meta(pid, {"live_window": {"start": round(win_start, 1),
                                                     "end": round(win_end, 1)}})
                 seek = max(0.0, win_start - offset)
-                playlist = _local_playlist(workdir, paths, f"win_{int(win_start)}")
+                playlist = _local_playlist(workdir, paths, f"win_{int(win_start)}", durations)
                 cmd = [ffmpeg(), "-y", "-v", "error", "-i", str(playlist)]
                 if seek > 0.01:
                     # -ss после -i: точное позиционирование по таймлайну плейлиста
@@ -541,7 +558,10 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                     audio, workdir, language=language,
                     model_name=opts.get("whisper_model") or None,
                 )
-                language = transcript.get("language") or language
+                detected = transcript.get("language") or language
+                if detected and not language:
+                    language = detected
+                    db.update_project(pid, language=detected)
                 print(f"[live] window {win_start:.0f}-{win_end:.0f} "
                       f"segments={len(transcript['segments'])}", file=sys.stderr)
                 db.update_project(pid, stage=f"Поиск моментов · окно {label}")
@@ -576,6 +596,8 @@ def process_windows(pid: str, opts: Dict[str, Any], stop: threading.Event) -> No
                 audio.unlink(missing_ok=True)
             failures = 0
 
+            meta = (db.get_project(pid) or {}).get("meta") or meta
+            ads = meta.get("ad_intervals") or ads
             settings = _settings(opts)
             ready_count = int(meta.get("live_clips") or 0)
             for i, cand in enumerate(found):
@@ -642,11 +664,11 @@ def _render_live_clip(workdir: Path, clip: Dict[str, Any], win_start: float,
     start = float(clip["start"]) - win_start
     end = float(clip["end"]) - win_start
     src = workdir / f"src_{clip['id']}.mp4"
-    paths, offset = _seg_spans(workdir, float(clip["start"]) - 1, float(clip["end"]) + 1)
+    paths, offset, durations = _seg_spans(workdir, float(clip["start"]) - 1, float(clip["end"]) + 1)
     if not paths:
         raise RuntimeError("Нет сегментов записи для фрагмента.")
     seek = max(0.0, float(clip["start"]) - offset)
-    playlist = _local_playlist(workdir, paths, f"clip_{clip['id']}")
+    playlist = _local_playlist(workdir, paths, f"clip_{clip['id']}", durations)
     cmd = [ffmpeg(), "-y", "-v", "error", "-i", str(playlist)]
     if seek > 0.01:
         cmd += ["-ss", f"{seek:.3f}"]
@@ -678,8 +700,13 @@ def stop_stream(pid: str) -> None:
         event.set()
         return
     project = db.get_project(pid)
-    if project and (project.get("meta") or {}).get("live"):
+    if (project and (project.get("meta") or {}).get("live")
+            and project.get("status") not in ("done", "error", "cancelled")):
         _STOP_EVENTS.setdefault(pid, threading.Event()).set()
+
+
+def pop_stop_event(pid: str) -> None:
+    _STOP_EVENTS.pop(pid, None)
 
 
 def run_stream(pid: str, options: Dict[str, Any]) -> None:

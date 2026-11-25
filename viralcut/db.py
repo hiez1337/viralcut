@@ -139,13 +139,21 @@ def _row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
 def create_project(url: str, options: Dict[str, Any], title: Optional[str] = None) -> Dict[str, Any]:
     pid = uuid.uuid4().hex[:12]
     now = time.time()
+    opts_dict = dict(options or {})
+    proj_title = title or url
     with session() as conn:
         conn.execute(
             "INSERT INTO projects (id, url, title, status, stage, progress, created_at, updated_at, options)"
             " VALUES (?,?,?,?,?,?,?,?,?)",
-            (pid, url, title or url, "queued", "В очереди", 0, now, now, json.dumps(options, ensure_ascii=False)),
+            (pid, url, proj_title, "queued", "В очереди", 0.0, now, now,
+             json.dumps(opts_dict, ensure_ascii=False)),
         )
-    return get_project(pid)
+    return {
+        "id": pid, "url": url, "title": proj_title, "status": "queued", "stage": "В очереди",
+        "progress": 0.0, "error": None, "created_at": now, "updated_at": now,
+        "duration": None, "language": None, "source": None, "thumb": None,
+        "meta": {}, "options": opts_dict,
+    }
 
 
 def get_project(pid: str) -> Optional[Dict[str, Any]]:
@@ -172,6 +180,33 @@ def list_projects(limit: int = 50) -> List[Dict[str, Any]]:
         item["meta"] = json.loads(item.get("meta") or "{}") if item.get("meta") else {}
         out.append(item)
     return out
+
+
+def list_active_projects_brief(limit: int = 8) -> List[Dict[str, Any]]:
+    """Быстрый список активных проектов для HUD/Инспектора без лишних запросов."""
+    with session() as conn:
+        rows = conn.execute(
+            "SELECT id, url, title, status, stage, progress, created_at, duration, language, thumb, meta"
+            " FROM projects WHERE status IN ('queued','preparing','running','processing')"
+            " ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out = []
+    for row in rows:
+        item = _row_to_dict(row)
+        item["meta"] = json.loads(item.get("meta") or "{}") if item.get("meta") else {}
+        out.append(item)
+    return out
+
+
+def active_job_summary() -> List[Dict[str, Any]]:
+    """Лёгкая сводка активных/последних задач без JSON-парсинга meta."""
+    with session() as conn:
+        rows = conn.execute(
+            "SELECT id, title, status, stage, progress FROM projects"
+            " ORDER BY created_at DESC LIMIT 5"
+        ).fetchall()
+    return [_row_to_dict(row) for row in rows]
 
 
 def update_project(pid: str, **fields: Any) -> None:
@@ -202,11 +237,15 @@ def merge_meta(pid: str, updates: Dict[str, Any], drop: tuple = ()) -> None:
 
 
 def set_recording_stage(pid: str, stage: str) -> None:
-    """Этап записи не должен перебивать распознавание/рендер и «Останавливаю…»."""
+    """Этап записи не должен перебивать распознавание/рендер и терминальные статусы."""
     sql = (
-        "UPDATE projects SET stage=?, updated_at=? WHERE id=? AND (stage IS NULL OR ("
+        "UPDATE projects SET stage=?, updated_at=? WHERE id=?"
+        " AND status NOT IN ('done', 'error', 'cancelled')"
+        " AND (stage IS NULL OR ("
         "stage NOT LIKE 'Распознавание%' AND stage NOT LIKE 'Рендер%'"
+        " AND stage NOT LIKE 'Поиск моментов%' AND stage NOT LIKE 'Повтор окна%'"
         " AND stage NOT LIKE 'Окно%' AND stage NOT LIKE 'Ошибка окна%'"
+        " AND stage NOT LIKE 'Ошибка конвейера%' AND stage NOT LIKE 'Отменено%'"
         " AND stage NOT LIKE 'Останавливаю%'))"
     )
     with session() as conn:
@@ -223,6 +262,9 @@ def add_clip(project_id: str, idx: int, start: float, end: float, score: float,
              title: str, hook: str, caption: str, words: List[Dict[str, Any]],
              settings: Dict[str, Any], status: str = "rendering") -> Dict[str, Any]:
     cid = uuid.uuid4().hex[:12]
+    now = time.time()
+    words_list = list(words or [])
+    settings_dict = dict(settings or {})
     with session() as conn:
         # повторный прогон того же проекта заменяет клип с этим номером
         conn.execute("DELETE FROM clips WHERE project_id=? AND idx=?", (project_id, idx))
@@ -230,10 +272,15 @@ def add_clip(project_id: str, idx: int, start: float, end: float, score: float,
             "INSERT INTO clips (id, project_id, idx, start, end, score, title, hook, caption, status, words, settings, created_at, updated_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (cid, project_id, idx, start, end, score, title, hook, caption, status,
-             json.dumps(words, ensure_ascii=False), json.dumps(settings, ensure_ascii=False),
-             time.time(), time.time()),
+             json.dumps(words_list, ensure_ascii=False), json.dumps(settings_dict, ensure_ascii=False),
+             now, now),
         )
-    return get_clip(cid)
+    return {
+        "id": cid, "project_id": project_id, "idx": idx, "start": start, "end": end,
+        "score": score, "title": title, "hook": hook, "caption": caption,
+        "status": status, "path": None, "thumb": None, "words": words_list,
+        "settings": settings_dict, "error": None, "created_at": now, "updated_at": now,
+    }
 
 
 def get_clip(cid: str) -> Optional[Dict[str, Any]]:
@@ -290,7 +337,8 @@ def reset_stale_jobs() -> None:
     with session() as conn:
         conn.execute(
             "UPDATE projects SET status='done', stage='Запись стрима прервана перезапуском приложения'"
-            " WHERE status IN ('queued','running','preparing') AND meta LIKE '%live%true%'"
+            " WHERE status IN ('queued','running','preparing')"
+            " AND (json_extract(meta, '$.live') = 1 OR meta LIKE '%\"live\": true%' OR meta LIKE '%\"live\":true%')"
         )
         conn.execute(
             "UPDATE projects SET status='error', error='Обработка прервана перезапуском сервера',"
@@ -300,6 +348,7 @@ def reset_stale_jobs() -> None:
             ready = bool(clip["path"] and Path(clip["path"]).is_file())
             conn.execute(
                 "UPDATE clips SET status=?, error=?, updated_at=? WHERE id=?",
-                ("ready" if ready else "error", "Рендер прерван перезапуском приложения",
+                ("ready" if ready else "error",
+                 None if ready else "Рендер прерван перезапуском приложения",
                  time.time(), clip["id"]),
             )

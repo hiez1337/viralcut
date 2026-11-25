@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
@@ -30,23 +31,31 @@ def invalidate_cache() -> None:
 
 def _dir_size(path: Path) -> int:
     try:
-        if not path.exists():
-            return 0
-        if path.is_file():
-            return int(path.stat().st_size)
-        total = 0
-        for item in path.rglob("*"):
-            try:
-                if item.is_file():
-                    total += int(item.stat().st_size)
-            except OSError:
-                continue
-        return total
+        st = path.stat()
     except OSError:
         return 0
+    if not os.path.isdir(path):
+        return int(st.st_size)
+    total = 0
+    stack = [str(path)]
+    while stack:
+        cur = stack.pop()
+        try:
+            with os.scandir(cur) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(entry.path)
+                        elif entry.is_file(follow_symlinks=False):
+                            total += int(entry.stat(follow_symlinks=False).st_size)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return total
 
 
-def _active_project_ids() -> Set[str]:
+def _active_project_ids(*, strict: bool = False) -> Set[str]:
     active: Set[str] = set(jobs.active_project_ids())
     try:
         with db.session() as conn:
@@ -56,18 +65,19 @@ def _active_project_ids() -> Set[str]:
             for row in rows:
                 active.add(str(row["id"]))
             clip_rows = conn.execute(
-                "SELECT DISTINCT c.project_id FROM clips c"
-                " JOIN projects p ON p.id = c.project_id"
-                " WHERE c.status='rendering' AND p.status NOT IN ('cancelled','error')"
+                "SELECT DISTINCT c.project_id FROM clips c "
+                "JOIN projects p ON p.id = c.project_id "
+                "WHERE c.status='rendering' AND p.status NOT IN ('cancelled', 'error')"
             ).fetchall()
             for row in clip_rows:
                 active.add(str(row["project_id"]))
     except Exception:
-        pass
+        if strict:
+            raise
     return active
 
 
-def _all_projects_map() -> Dict[str, Dict[str, Any]]:
+def _all_projects_map(*, strict: bool = False) -> Dict[str, Dict[str, Any]]:
     projects: Dict[str, Dict[str, Any]] = {}
     try:
         with db.session() as conn:
@@ -85,7 +95,8 @@ def _all_projects_map() -> Dict[str, Dict[str, Any]]:
                     "meta": meta if isinstance(meta, dict) else {},
                 }
     except Exception:
-        pass
+        if strict:
+            raise
     return projects
 
 
@@ -109,24 +120,26 @@ def _add_unique(
     return sz
 
 
-def _collect_targets() -> Tuple[
+def _collect_targets(*, strict: bool = False, include_models: bool = True) -> Tuple[
     Dict[str, Any],
     List[Tuple[str, Path]],
     List[Tuple[str, Path]],
     Dict[str, Optional[str]],
 ]:
-    active_ids = _active_project_ids()
-    projects_map = _all_projects_map()
+    active_ids = _active_project_ids(strict=strict)
+    projects_map = _all_projects_map(strict=strict)
 
     temp_targets: List[Tuple[str, Path]] = []
     source_targets: List[Tuple[str, Path]] = []
     source_pids: Dict[str, Optional[str]] = {}
+    audio_cleared_pids: Dict[str, Optional[str]] = {}
     seen_temp: Set[str] = set()
     seen_source: Set[str] = set()
 
     clips_bytes = 0
     temp_bytes = 0
     sources_bytes = 0
+    projects_bytes = 0
     active_skipped = 0
 
     if PROJECTS_DIR.is_dir():
@@ -136,7 +149,9 @@ def _collect_targets() -> Tuple[
             entries = []
         for pdir in entries:
             if not pdir.is_dir():
+                projects_bytes += _dir_size(pdir)
                 continue
+            projects_bytes += _dir_size(pdir)
             pid = pdir.name
             for sub in ("clips", "previews", "thumbs", "ass"):
                 clips_bytes += _dir_size(pdir / sub)
@@ -185,7 +200,9 @@ def _collect_targets() -> Tuple[
                 if meta.get("segments_mode"):
                     for audio_file in pdir.glob("audio.*"):
                         if audio_file.suffix.lower() not in _TEMP_PART_SUFFIXES:
-                            temp_bytes += _add_unique(temp_targets, seen_temp, pid, audio_file)
+                            if _add_unique(temp_targets, seen_temp, pid, audio_file) > 0:
+                                temp_bytes += audio_file.stat().st_size
+                                audio_cleared_pids[pid] = proj.get("source")
 
             if status in _SOURCE_ELIGIBLE_STATUSES:
                 proj_source_added = 0
@@ -201,8 +218,7 @@ def _collect_targets() -> Tuple[
                 if proj_source_added > 0:
                     source_pids[pid] = proj.get("source")
 
-    projects_bytes = _dir_size(PROJECTS_DIR)
-    models_bytes = _dir_size(MODELS_DIR)
+    models_bytes = _dir_size(MODELS_DIR) if include_models else 0
 
     stats = {
         "projects_mb": round(projects_bytes / 1048576.0, 1),
@@ -214,6 +230,7 @@ def _collect_targets() -> Tuple[
         "models_mb": round(models_bytes / 1048576.0, 1),
         "active_skipped": active_skipped,
         "data_dir": str(DATA_DIR),
+        "_audio_cleared_pids": audio_cleared_pids,
     }
     return stats, temp_targets, source_targets, source_pids
 
@@ -226,7 +243,8 @@ def storage_summary(force: bool = False) -> Dict[str, Any]:
         if not force and cached is not None and (now - float(_CACHE.get("ts") or 0.0)) < _CACHE_TTL:
             return dict(cached)
 
-    stats, _, _, _ = _collect_targets()
+    stats, _, _, _ = _collect_targets(strict=False, include_models=True)
+    stats.pop("_audio_cleared_pids", None)
     with _CACHE_LOCK:
         _CACHE["ts"] = time.monotonic()
         _CACHE["data"] = stats
@@ -239,9 +257,12 @@ def run_cleanup(scope: str = "temp") -> Dict[str, Any]:
         raise ValueError("Неизвестный режим очистки: выберите 'temp' или 'sources'.")
 
     with _CLEAN_LOCK:
-        _, temp_targets, source_targets, source_pids = _collect_targets()
+        pre_stats, temp_targets, source_targets, source_pids = _collect_targets(
+            strict=True, include_models=False,
+        )
+        audio_cleared_pids = pre_stats.pop("_audio_cleared_pids", {})
         targets = temp_targets if scope == "temp" else source_targets
-        active_ids = _active_project_ids()
+        active_ids = _active_project_ids(strict=True)
 
         freed_bytes = 0
         removed = 0
@@ -268,16 +289,16 @@ def run_cleanup(scope: str = "temp") -> Dict[str, Any]:
             except OSError:
                 skipped += 1
 
-        if scope == "sources":
-            for pid, src_raw in source_pids.items():
-                if pid in active_ids:
-                    continue
-                if src_raw:
-                    try:
-                        if not Path(str(src_raw)).exists():
-                            db.update_project(pid, source=None)
-                    except OSError:
+        clear_map = source_pids if scope == "sources" else audio_cleared_pids
+        for pid, src_raw in clear_map.items():
+            if pid in active_ids:
+                continue
+            if src_raw:
+                try:
+                    if not Path(str(src_raw)).exists():
                         db.update_project(pid, source=None)
+                except OSError:
+                    db.update_project(pid, source=None)
 
         invalidate_cache()
         summary = storage_summary(force=True)

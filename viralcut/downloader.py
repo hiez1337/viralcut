@@ -418,7 +418,7 @@ def _youtube_info(url: str, browser: Optional[str], pot: bool,
                    for f in info.get("formats") or []):
                 best = (info, args, label)
                 break
-        elif not pot or height >= preferred_height:
+        elif height >= preferred_height:
             break
     if best is not None:
         if progress:
@@ -486,6 +486,10 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
     except DownloadError as exc:
         print(f"[youtube] проверка {quality}p: {exc}", file=sys.stderr, flush=True)
 
+    custom_debug.record_download(
+        active=True, kind="video", client=label, format_id=selector,
+        target_height=quality, source_height=0, fallback=False, fallback_reason="", pct=0.0,
+    )
     try:
         with tempfile.TemporaryDirectory(prefix=".youtube-", dir=dest_dir) as scratch:
             work = Path(scratch)
@@ -494,6 +498,7 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
                                                   pot=pot, extractor_args=args, required_fragments=True),
                                   quality, progress)
             except Cancelled:
+                custom_debug.record_download(active=False)
                 raise
             except Exception as exc:
                 from . import ytdlp_bin
@@ -507,11 +512,13 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
                         alt = Path(alternate)
                         meta = _retry_503(lambda: ytdlp_bin.download(
                             url, alt, quality, browser, progress, format_selector=exact_selector,
+                            language=language,
                         ), quality, progress)
                         downloaded = Path(meta["path"])
                         meta["path"] = downloaded.replace(work / downloaded.name)
                         label = "yt-dlp"
                 except Cancelled:
+                    custom_debug.record_download(active=False)
                     raise
                 except Exception as fallback_exc:
                     if _is_http_503(fallback_exc):
@@ -521,6 +528,13 @@ def _download_exact_youtube(url: str, dest_dir: Path, quality: int,
                     raise exc from fallback_exc
             path = Path(meta["path"])
             actual = utils.probe(path)
+            custom_debug.record_download(
+                active=False, kind="video", client=label,
+                format_id=meta.get("selected_format") or selector,
+                source_height=actual.get("height") or quality, target_height=quality,
+                speed_mbps=meta.get("avg_speed_mbps"), pct=100.0,
+                fallback=False, fallback_reason="",
+            )
             resolution = _resolution(actual)
             if resolution != quality or not actual.get("has_audio"):
                 raise DownloadError(
@@ -660,7 +674,7 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
         if ytdlp_bin.enabled():
             if progress:
                 progress(0.02, "Пробую запасной движок загрузки…")
-            meta = ytdlp_bin.download(url, dest_dir, max_height, browser, progress)
+            meta = ytdlp_bin.download(url, dest_dir, max_height, browser, progress, language=language)
             try:
                 info = utils.probe(meta["path"])
                 meta["height"] = info.get("height") or None
@@ -670,10 +684,17 @@ def download(url: str, dest_dir: Path, progress: ProgressCb = None,
             meta["quality"] = f"{meta.get('height') or max_height}p · yt-dlp"
             meta["fallback"] = True
             meta["fallback_reason"] = _fmt_err(last_error or DownloadError(""))
+            custom_debug.record_download(
+                active=False, kind="video", client="yt-dlp",
+                format_id=meta.get("selected_format") or "bin",
+                source_height=meta.get("height") or 0, target_height=max_height,
+                pct=100.0, fallback=True, fallback_reason=meta["fallback_reason"] or "",
+            )
             print(f"download ok (запасной движок): height={meta.get('height')}",
                   file=sys.stderr)
             return meta
     except Cancelled:
+        custom_debug.record_download(active=False)
         raise
     except Exception as exc:  # noqa: BLE001
         print(f"[ytdlp-bin] не помог: {str(exc)[:200]}", file=sys.stderr)

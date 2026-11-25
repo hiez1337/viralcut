@@ -281,6 +281,8 @@ def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16"
     else:
         crop_w = src_w
         crop_h = max(2, int(round(src_w * ah / aw)))
+    crop_w = max(2, min(src_w, crop_w - (crop_w % 2)))
+    crop_h = max(2, min(src_h, crop_h - (crop_h % 2)))
 
     cap = cv2.VideoCapture(str(source))
     if not cap.isOpened():
@@ -294,17 +296,25 @@ def build_crop_path(source: Path, start: float, end: float, aspect: str = "9:16"
         detector = _make_detector()
         samples: List[Tuple[float, List[Dict[str, float]], List[Any]]] = []
         frame_idx = 0
+        last_ts = -1.0
         while True:
-            ok, frame = cap.read()
-            if not ok:
+            if not cap.grab():
                 break
             ts = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0
+            if ts <= 0.0 and start > 0.5 and frame_idx == 0:
+                ts = start
+            elif ts <= last_ts and last_ts >= 0.0:
+                ts = last_ts + (1.0 / max(1.0, fps))
+            last_ts = ts
             if ts < start - 0.05:
                 frame_idx += 1
                 continue
             if ts > end:
                 break
             if frame_idx % step == 0:
+                ok, frame = cap.retrieve()
+                if not ok or frame is None:
+                    break
                 h, w = frame.shape[:2]
                 scale = min(1.0, max_width / max(1, w))
                 small = cv2.resize(frame, (int(w * scale), int(h * scale))) if scale < 1 else frame

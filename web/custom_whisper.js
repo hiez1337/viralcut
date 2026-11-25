@@ -13,6 +13,8 @@
   let stateData = null;
   let pollTimer = null;
   let inFlight = false;
+  let actionBusy = false;
+  let reqSeq = 0;
   let prevDownloading = null;
   let visBound = false;
 
@@ -50,20 +52,59 @@
     pollTimer = setTimeout(() => fetchModels(), delayMs);
   }
 
+  function patchDownloadProgress(data) {
+    if (!isMounted() || !data || !data.downloading_model) return false;
+    const dlBox = slotEl.querySelector("#vcWmDlBox");
+    if (!dlBox) return false;
+    if (
+      slotEl.dataset.dlModel !== (data.downloading_model || "") ||
+      slotEl.dataset.activeModel !== (data.active || "") ||
+      slotEl.dataset.activeLang !== (data.active_language || "auto")
+    ) {
+      return false;
+    }
+    const dlObj = (data.models || []).find((m) => m.id === data.downloading_model);
+    if (!dlObj) return false;
+    const pct = Math.max(0, Math.min(100, Math.round(Number(dlObj.pct) || 0)));
+    const speedTxt = dlObj.speed_mbps > 0 ? ` · ${dlObj.speed_mbps} МБ/с` : "";
+    const etaTxt = dlObj.eta_s ? ` · ${fmtEta(dlObj.eta_s)}` : "";
+    const titleEl = dlBox.querySelector("strong");
+    const metaEl = dlBox.querySelector(".vc-wm-dl-meta");
+    const barEl = dlBox.querySelector(".vc-wm-dl-bar i");
+    if (titleEl) titleEl.textContent = `Скачиваю Whisper ${dlObj.label}… ${pct}%`;
+    if (metaEl) metaEl.textContent = `${fmtSizeMb(dlObj.downloaded_mb)} / ${fmtSizeMb(dlObj.total_mb)}${speedTxt}${etaTxt}`;
+    if (barEl) barEl.style.width = `${Math.max(2, pct)}%`;
+
+    for (const card of slotEl.querySelectorAll(".vc-wm-card[data-model]")) {
+      if (card.dataset.model !== dlObj.id) continue;
+      const stEl = card.querySelector(".vc-wm-status");
+      const miniEl = card.querySelector(".vc-wm-mini-bar i");
+      if (!stEl || !miniEl) return false;
+      stEl.textContent = `Загрузка ${pct}%`;
+      miniEl.style.width = `${Math.max(2, pct)}%`;
+      break;
+    }
+    return true;
+  }
+
   async function fetchModels() {
     if (inFlight || !isMounted()) return;
     inFlight = true;
+    const seq = ++reqSeq;
     try {
       const resp = await fetch("/api/whisper/models", { cache: "no-store" });
-      if (!resp.ok) return;
+      if (!resp.ok || seq !== reqSeq || !isMounted()) return;
       const data = await resp.json();
+      if (seq !== reqSeq || !isMounted()) return;
       const finishedModel =
         prevDownloading && !data.downloading_model
           ? (data.models || []).find((m) => m.id === prevDownloading)
           : null;
       prevDownloading = data.downloading_model || null;
       stateData = data;
-      render();
+      if (!patchDownloadProgress(data)) {
+        render();
+      }
       if (finishedModel && finishedModel.status === "ready") {
         if (typeof window.toast === "function") {
           window.toast(`Модель Whisper ${finishedModel.label} скачана и готова`);
@@ -83,8 +124,10 @@
   }
 
   async function selectModel(modelId) {
-    if (!modelId) return;
+    if (!modelId || actionBusy) return;
     if (stateData && stateData.active === modelId) return;
+    actionBusy = true;
+    const seq = ++reqSeq;
     try {
       const resp = await fetch("/api/whisper/model", {
         method: "POST",
@@ -93,20 +136,25 @@
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      if (seq > reqSeq) return;
       stateData = data;
       prevDownloading = data.downloading_model || null;
-      render();
+      if (isMounted()) render();
       if (typeof window.vcCheckHealth === "function") window.vcCheckHealth();
       if (data.downloading_model) schedulePoll(650);
     } catch (err) {
       if (typeof window.toast === "function") {
         window.toast(`Не удалось выбрать модель: ${err.message}`, "err");
       }
+    } finally {
+      actionBusy = false;
     }
   }
 
   async function downloadModel(modelId) {
-    if (!modelId) return;
+    if (!modelId || actionBusy) return;
+    actionBusy = true;
+    const seq = ++reqSeq;
     try {
       const resp = await fetch("/api/whisper/download", {
         method: "POST",
@@ -115,9 +163,10 @@
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      if (seq > reqSeq) return;
       stateData = data;
       prevDownloading = data.downloading_model || modelId;
-      render();
+      if (isMounted()) render();
       if (data.downloading_model) {
         schedulePoll(350);
       } else if (typeof window.vcCheckHealth === "function") {
@@ -127,12 +176,16 @@
       if (typeof window.toast === "function") {
         window.toast(`Ошибка загрузки модели: ${err.message}`, "err");
       }
+    } finally {
+      actionBusy = false;
     }
   }
 
   async function selectLanguage(langId) {
-    if (!langId) return;
+    if (!langId || actionBusy) return;
     if (stateData && stateData.active_language === langId) return;
+    actionBusy = true;
+    const seq = ++reqSeq;
     try {
       const resp = await fetch("/api/whisper/language", {
         method: "POST",
@@ -141,12 +194,17 @@
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      if (seq > reqSeq) return;
       stateData = data;
-      render();
+      prevDownloading = data.downloading_model || null;
+      if (isMounted()) render();
+      if (data.downloading_model) schedulePoll(650);
     } catch (err) {
       if (typeof window.toast === "function") {
         window.toast(`Не удалось выбрать язык: ${err.message}`, "err");
       }
+    } finally {
+      actionBusy = false;
     }
   }
 
@@ -223,7 +281,7 @@
       const speedTxt = dlObj.speed_mbps > 0 ? ` · ${dlObj.speed_mbps} МБ/с` : "";
       const etaTxt = dlObj.eta_s ? ` · ${fmtEta(dlObj.eta_s)}` : "";
       dlBoxHtml = `
-        <div class="vc-wm-dl-box">
+        <div class="vc-wm-dl-box" id="vcWmDlBox">
           <div class="vc-wm-dl-row">
             <strong>Скачиваю Whisper ${esc(dlObj.label)}… ${pct}%</strong>
             <span class="vc-wm-dl-meta">${esc(fmtSizeMb(dlObj.downloaded_mb))} / ${esc(fmtSizeMb(dlObj.total_mb))}${esc(speedTxt)}${esc(etaTxt)}</span>
@@ -270,6 +328,9 @@
       </div>
     `;
 
+    slotEl.dataset.dlModel = anyDl || "";
+    slotEl.dataset.activeModel = stateData.active || "";
+    slotEl.dataset.activeLang = activeLang || "auto";
     slotEl.innerHTML = `
       <div class="vc-wm-wrap">
         <div class="vc-wm-head">

@@ -5,6 +5,8 @@
 """
 from __future__ import annotations
 
+import bisect
+import math
 import re
 import subprocess
 import threading
@@ -108,9 +110,26 @@ def _norm(text: str) -> str:
     return text.lower().replace("ё", "е")
 
 
+_COMPILED_PATTERNS: Dict[Tuple[str, ...], Tuple[re.Pattern[str], ...]] = {}
+_PATTERN_CACHE_LOCK = threading.Lock()
+_AUDIO_ONLY_SUFFIXES = frozenset({".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac", ".opus", ".wma"})
+_SHOWINFO_PTS_RE = re.compile(r"showinfo.*\bpts_time:\s*([^\s]+)")
+
+
 def _count_patterns(text: str, patterns: List[str]) -> int:
     low = _norm(text)
-    return sum(1 for p in patterns if re.search(p, low))
+    key = tuple(patterns)
+    with _PATTERN_CACHE_LOCK:
+        compiled = _COMPILED_PATTERNS.get(key)
+        if compiled is None:
+            compiled = tuple(re.compile(p) for p in key)
+            _COMPILED_PATTERNS[key] = compiled
+    return sum(1 for rx in compiled if rx.search(low))
+
+
+def _count_substrings(text: str, patterns: List[str]) -> int:
+    low = _norm(text)
+    return sum(1 for p in patterns if p in low)
 
 
 def _has_filler_start(text: str) -> bool:
@@ -406,7 +425,7 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
     retention = max(0.0, min(1.0, retention))
 
     # 3. Эмоциональная насыщенность
-    emo_hits = _count_patterns(text, EMOTION_RU) + _count_patterns(text, EMOTION_EN)
+    emo_hits = _count_substrings(text, EMOTION_RU) + _count_substrings(text, EMOTION_EN)
     emo_density = emo_hits / max(1.0, n_words / 100.0)
     emotion = min(1.0, emo_density / 7.0)
 
@@ -452,9 +471,14 @@ def _score_window(sents: List[Dict[str, Any]], media_duration: float,
     # частая смена сцен внутри окна — признак динамичного фрагмента.
     visual = 0.0
     if scenes:
-        inside = [t for t in scenes if window_start <= t <= window_end]
-        starts_on_cut = any(abs(window_start - t) <= 0.4 for t in scenes)
-        density = min(1.0, len(inside) / max(1.0, dur / 12.0))
+        i0 = bisect.bisect_left(scenes, window_start)
+        i1 = bisect.bisect_right(scenes, window_end, lo=i0)
+        inside_count = i1 - i0
+        starts_on_cut = (
+            (i0 > 0 and window_start - scenes[i0 - 1] <= 0.4)
+            or (i0 < len(scenes) and scenes[i0] - window_start <= 0.4)
+        )
+        density = min(1.0, inside_count / max(1.0, dur / 12.0))
         visual = 0.6 * (1.0 if starts_on_cut else 0.0) + 0.4 * density
 
     score = (
@@ -554,6 +578,8 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         reactions = None
     try:
         scenes: Optional[List[float]] = scene_changes(media)
+        if scenes:
+            scenes = sorted(scenes)
     except Exception:  # noqa: BLE001
         scenes = None
 
@@ -656,23 +682,24 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         return re.sub(r"[^\w]+", " ", _norm(t)).strip()
 
     picked: List[Dict[str, Any]] = []
+    picked_meta: List[Tuple[str, set]] = []
     for cand in ordered_candidates:
         if len(picked) >= limit:
             break
         overlap = False
+        cand_title = _norm_title(cand["title"])
         cand_words = set(_keywords(cand["text"], 14))
-        for p in picked:
+        for p, (p_title, p_words) in zip(picked, picked_meta):
             inter = min(p["end"], cand["end"]) - max(p["start"], cand["start"])
             if inter > 0:
                 short = min(p["end"] - p["start"], cand["end"] - cand["start"])
                 if inter / short > 0.18:
                     overlap = True
                     break
-            if difflib.SequenceMatcher(None, _norm_title(cand["title"]), _norm_title(p["title"])).ratio() > 0.82:
+            if difflib.SequenceMatcher(None, cand_title, p_title).ratio() > 0.82:
                 overlap = True
                 break
             # почти одинаковый текст (повторы, нарезка одного и того же) — тоже дубль
-            p_words = set(_keywords(p["text"], 14))
             if cand_words and p_words:
                 jaccard = len(cand_words & p_words) / len(cand_words | p_words)
                 if jaccard > 0.62:
@@ -680,6 +707,7 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
                     break
         if not overlap:
             picked.append(cand)
+            picked_meta.append((cand_title, cand_words))
 
     picked.sort(key=lambda c: c["score"], reverse=True)
     out: List[Dict[str, Any]] = []
@@ -697,7 +725,13 @@ def find_segments(segments: List[Dict[str, Any]], media: Path, duration: float,
         if scenes:
             # начинать с монтажной склейки, а не посреди сцены; но не ценой
             # обрезания ниже минимальной длины
-            nearest = min(scenes, key=lambda t: abs(t - start))
+            s_idx = bisect.bisect_left(scenes, start)
+            near_cands = []
+            if s_idx > 0:
+                near_cands.append(scenes[s_idx - 1])
+            if s_idx < len(scenes):
+                near_cands.append(scenes[s_idx])
+            nearest = min(near_cands, key=lambda t: abs(t - start))
             if (abs(nearest - start) <= 0.35 and end - nearest >= min_dur * 0.9
                     and nearest < start + 0.35):
                 start = max(0.0, nearest)
@@ -802,8 +836,14 @@ _WIN_SECONDS = 1.0
 _STEP_SECONDS = 0.25
 
 
+_FEAT_CACHE: Optional[Tuple[Any, Any]] = None
+_MOD_CACHE: Dict[int, Tuple[Any, Any]] = {}
+_AUDIO_FEAT_LOCK = threading.Lock()
+
+
 def _frame_features(audio: Any) -> Optional[Dict[str, Any]]:
     """Покадровые признаки: RMS, спектральная плоскость, доля ВЧ, переходы нуля."""
+    global _FEAT_CACHE
     try:
         import numpy as np
     except Exception:  # noqa: BLE001
@@ -813,18 +853,29 @@ def _frame_features(audio: Any) -> Optional[Dict[str, Any]]:
     count = 1 + (len(audio) - _N_FFT) // _HOP
     if count <= 0:
         return None
-    window = np.hanning(_N_FFT).astype(np.float32)
-    freqs = np.fft.rfftfreq(_N_FFT, 1.0 / _SR)
-    high_band = (freqs >= 1500) & (freqs <= 7000)
+    with _AUDIO_FEAT_LOCK:
+        cached = _FEAT_CACHE
+        if cached is None:
+            window = np.hanning(_N_FFT).astype(np.float32)
+            freqs = np.fft.rfftfreq(_N_FFT, 1.0 / _SR)
+            high_band = (freqs >= 1500) & (freqs <= 7000)
+            cached = (window, high_band)
+            _FEAT_CACHE = cached
+    window, high_band = cached
     rms = np.empty(count, dtype=np.float32)
     flatness = np.empty(count, dtype=np.float32)
     high_ratio = np.empty(count, dtype=np.float32)
     zcr = np.empty(count, dtype=np.float32)
+    view_fn = getattr(np.lib.stride_tricks, "sliding_window_view", None)
+    all_frames = view_fn(audio, _N_FFT)[::_HOP] if view_fn is not None else None
     block = 1024
     for start in range(0, count, block):
         stop = min(count, start + block)
-        idx = np.arange(_N_FFT)[None, :] + _HOP * np.arange(start, stop)[:, None]
-        frames = audio[idx]
+        if all_frames is not None:
+            frames = all_frames[start:stop]
+        else:
+            idx = np.arange(_N_FFT)[None, :] + _HOP * np.arange(start, stop)[:, None]
+            frames = audio[idx]
         spec = np.abs(np.fft.rfft(frames * window, axis=1)) + 1e-10
         power = spec * spec
         total = power.sum(axis=1) + 1e-12
@@ -843,15 +894,25 @@ def _modulation(envelope: Any) -> float:
         import numpy as np
     except Exception:  # noqa: BLE001
         return 0.0
-    if len(envelope) < 8:
+    n = len(envelope)
+    if n < 8:
         return 0.0
     centered = envelope - float(np.mean(envelope))
     if not np.any(centered):
         return 0.0
-    spectrum = np.abs(np.fft.rfft(centered * np.hanning(len(centered))))
-    freqs = np.fft.rfftfreq(len(centered), _HOP / _SR)
+    with _AUDIO_FEAT_LOCK:
+        cached = _MOD_CACHE.get(n)
+        if cached is None:
+            win = np.hanning(n)
+            freqs = np.fft.rfftfreq(n, _HOP / _SR)
+            band = (freqs >= 3.0) & (freqs <= 9.0)
+            if len(_MOD_CACHE) >= 64:
+                _MOD_CACHE.clear()
+            cached = (win, band)
+            _MOD_CACHE[n] = cached
+    win, band = cached
+    spectrum = np.abs(np.fft.rfft(centered * win))
     total = float(spectrum.sum()) + 1e-12
-    band = (freqs >= 3.0) & (freqs <= 9.0)
     return float(spectrum[band].sum()) / total if np.any(band) else 0.0
 
 
@@ -876,13 +937,6 @@ def _reaction_segments(features: Dict[str, Any], kind: str) -> List[Dict[str, fl
     # «тишина» — 5-й процентиль: реакции на фоне тишины видно, а непрерывный
     # гул/музыка не считаются «реакцией» сами по себе
     quiet_floor = max(float(np.percentile(rms, 5)) * 2.0, 0.004)
-    if kind == "laughter":
-        frame_ok = ((high_ratio > 0.30) & (flatness > 0.015) & (flatness < 0.70)
-                    & (zcr > 0.05) & (zcr < 0.55) & (rms > quiet_floor))
-    else:
-        frame_ok = ((flatness > 0.05) & (high_ratio > 0.50)
-                    & (zcr > 0.26) & (rms > quiet_floor))
-
     win = max(8, int(round(_WIN_SECONDS / spf)))
     step = max(1, int(round(_STEP_SECONDS / spf)))
     if len(rms) < win:
@@ -1016,43 +1070,115 @@ def scene_changes(media: Path, width: int = 96, height: int = 54,
     кадров — это ~45 МБ вместо сотен. Гистограммы сравниваем cv2.compareHist:
     плавное движение камеры скачком не считается, а склейка — считается.
     """
+    if media.suffix.lower() in _AUDIO_ONLY_SUFFIXES:
+        return []
     try:
         import cv2
         import numpy as np
     except Exception:  # noqa: BLE001 — без OpenCV работаем без сцен
         return []
-    cmd = [ffmpeg(), "-hide_banner", "-nostats", "-v", "info",
+    cmd = [ffmpeg(), "-nostdin", "-hide_banner", "-nostats", "-v", "info",
            "-skip_frame", "nokey", "-i", str(media), "-an",
            # passthrough: иначе ffmpeg дорисовывает кадры до CFR (dup=…) и
            # порядок «кадр ↔ pts_time» перестаёт совпадать
            "-vf", f"scale={width}:{height}:flags=fast_bilinear,showinfo",
-           "-fps_mode", "passthrough",
+           "-fps_mode", "passthrough", "-frames:v", str(limit),
            "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
+    frame_size = width * height * 3
+    times: List[Optional[float]] = []
+    cut_indices: List[int] = []
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=600,
-                              **utils.subprocess_kwargs())
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
+            **utils.subprocess_kwargs(),
+        )
     except Exception:  # noqa: BLE001
         return []
-    frame_size = width * height * 3
-    data = proc.stdout or b""
-    count = min(len(data) // frame_size, limit)
-    stderr = (proc.stderr or b"").decode("utf-8", "replace")
-    times = [float(x) for x in re.findall(r"pts_time:\s*([0-9.]+)", stderr)]
+
+    def _read_stderr() -> None:
+        if proc.stderr is None:
+            return
+        try:
+            for raw_line in proc.stderr:
+                line = raw_line.decode("utf-8", "replace")
+                m = _SHOWINFO_PTS_RE.search(line)
+                if not m:
+                    continue
+                tok = m.group(1)
+                try:
+                    val = float(tok)
+                    times.append(val if math.isfinite(val) else None)
+                except ValueError:
+                    times.append(None)
+        except Exception:  # noqa: BLE001
+            pass
+
+    err_thread = threading.Thread(target=_read_stderr, daemon=True)
+    err_thread.start()
+    timer = threading.Timer(600, proc.kill)
+    timer.daemon = True
+    timer.start()
+
+    count = 0
+    previous = None
+    try:
+        stdout = proc.stdout
+        if stdout is None:
+            return []
+        while count < limit:
+            buf = stdout.read(frame_size)
+            if not buf or len(buf) < frame_size:
+                break
+            frame = np.frombuffer(buf, dtype=np.uint8).reshape(height, width, 3)
+            hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            hist = cv2.calcHist([hsv], [0, 1], None, [24, 12], [0, 180, 0, 256])
+            cv2.normalize(hist, hist)
+            if previous is not None:
+                distance = float(cv2.compareHist(previous, hist, cv2.HISTCMP_BHATTACHARYYA))
+                if distance >= threshold:
+                    cut_indices.append(count)
+            previous = hist
+            count += 1
+    except Exception:  # noqa: BLE001
+        return []
+    finally:
+        timer.cancel()
+        if proc.stdout is not None:
+            try:
+                proc.stdout.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if count >= limit and proc.poll() is None:
+            try:
+                proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            proc.wait(timeout=10)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+                proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
+        if proc.stderr is not None:
+            try:
+                proc.stderr.close()
+            except Exception:  # noqa: BLE001
+                pass
+        err_thread.join(timeout=5.0)
+
     if count < 2 or len(times) < count:
         return []
     cuts: List[float] = []
-    previous = None
-    for i in range(count):
-        raw = data[i * frame_size:(i + 1) * frame_size]
-        frame = np.frombuffer(raw, dtype=np.uint8).reshape(height, width, 3)
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv], [0, 1], None, [24, 12], [0, 180, 0, 256])
-        cv2.normalize(hist, hist)
-        if previous is not None:
-            distance = float(cv2.compareHist(previous, hist, cv2.HISTCMP_BHATTACHARYYA))
-            if distance >= threshold:
-                cuts.append(round(times[i], 3))
-        previous = hist
+    for idx in cut_indices:
+        t = times[idx]
+        if t is not None and t >= 0.0:
+            cuts.append(round(t, 3))
+    cuts.sort()
     # склейки ближе 0.3 с — это дребезг одного и того же перехода
     clean: List[float] = []
     for t in cuts:

@@ -220,6 +220,25 @@
   - `.\.venv-win\Scripts\python.exe -m unittest tests/test_custom_features.py` (все 36 тестов успешно проходят).
   - `.\.venv-win\Scripts\python.exe -m unittest discover tests` (все 61 тест успешно проходят).
 
+## Глубокий аудит багов и оптимизация через /swarm (v1.6.0)
+- **Цель**: Устранить логические ошибки, гонки потоков, утечки ресурсов/процессов на Windows, проблемы CSS/UI и узкие места по CPU/RAM/DOM.
+- **Кастомные файлы и модули**:
+  - `viralcut/custom_whisper.py`: TTL-кэш CT2 CUDA и сведений о GPU, скрытое окно `nvidia-smi` (`0x08000000`, таймаут 3 с), пропуск лишнего `transcribe._reset_model()`, маппинг `float16`/`int8_float16` → `("cpu", "int8")` / `("cpu", "float32")` в `whisper_candidates()`, защита от затирания `state="done"` при `Cancelled`.
+  - `viralcut/custom_fonts.py`: `RLock()` для `_SYNC_LOCK`, блокировка `save()`/`delete()`, фильтрация `.is_file()` и расширенный `_FAMILY_SAFE`.
+  - `viralcut/custom_downloader.py`: ранжирование/фильтрация в `pick_best_format()` по короткой стороне (`min(width, height)`) для вертикальных видео.
+  - `viralcut/custom_cleanup.py`: `_dir_size()` переведён на `os.scandir`, добавлен строгий режим БД в `run_cleanup()`, исключены застрявшие клипы `cancelled`/`error` проектов из `_active_project_ids()`, пропущен обход `MODELS_DIR`, очищается `source` после удаления `audio.*`.
+  - `viralcut/custom_debug.py`: пропуск `--query-compute-apps` без активных PID и 15-сек кулдаун, добавлен `invalidate_idle_whisper()`, использование `db.list_active_projects_brief(8)` и `render.hw_cached()`.
+  - `web/custom_settings.js`, `web/custom_settings.css`: исправлены пустые карточки пресетов (`label`/`desc`), изолированы классы `.vc-settings-panel`/`.vc-settings-body`, сохранение нестандартных значений селектов, доступность с клавиатуры и `window.vcCloseAnyModal`.
+  - `web/custom_whisper.js`, `web/custom_debug.js`: добавлены `reqSeq`/блокировка действий и точечное обновление прогресс-бара скачивания модели; пропуск лишних перерисовок инспектора и защита от срыва клика при зажатом указателе.
+- **Изменённые файлы upstream**:
+  - `viralcut/subtitles.py`, `viralcut/analyze.py`, `viralcut/utils.py`, `viralcut/reframe.py`, `viralcut/render.py`, `viralcut/pip.py`: исправлены `free_pos` при `sub_position="middle"`, кэш компилированных regex и `bisect`/`sliding_window_view`/потоковый `scene_changes()`, `_PROBE_CACHE` и поворот 270°, чётные размеры кропа и `grab()`/`retrieve()` в `reframe.py`, экранирование апострофов `_esc()` и быстрый blur `_bg_chain()` в `render.py`, атомарная `ensure_mask()` в `pip.py`.
+  - `viralcut/cpu_limit.py`, `viralcut/gpu_pref.py`, `viralcut/settings.py`, `viralcut/resources.py`, `viralcut/system_stats.py`, `viralcut/ytdlp_bin.py`, `viralcut/downloader.py`, `viralcut/transcribe.py`, `viralcut/ai.py`, `viralcut/assistant_actions.py`, `viralcut/agent.py`, `viralcut/diagnostics.py`, `desktop/main.py`: исправлены Win32 Job API, сброс реестра `"auto"`, кэш `settings._load()` по `stat`, быстрая нарезка WAV `_cut_window()`, URL-валидация и парсер JSON AI, область видимости дампов в `diagnostics.py`, изоляция логов и проверка путей в `desktop/main.py`.
+  - `viralcut/db.py`, `viralcut/live.py`, `viralcut/jobs.py`, `viralcut/pipeline.py`, `viralcut/main.py`, `web/app.js`, `web/styles.css`: оптимизированы SQL-запросы и кэш ZIP/кадров, повышена устойчивость записи стримов, исправлены лишние `}` в `styles.css`, подключена `loadAudioTracks()`, синхронизация `loadAiStatus()`, ленивая подгрузка `<video>` по наведению и оптимизация поллинга в `app.js`.
+  - `tests/test_custom_features.py`: добавлен класс `OptimizationAndAuditRegressionTest` (8 регрессионных тестов).
+- **Проверка**:
+  - `node --check` для `web/app.js`, `web/custom_whisper.js`, `web/custom_settings.js`, `web/custom_debug.js` (код выхода 0).
+  - Полный прогон 19 тестовых модулей `unittest` (`Ran 262 tests in 92.315s`, `OK (skipped=7)`).
+
 <!-- Шаблон для будущих изменений:
 ## [Название функции / исправления]
 - **Цель**: Зачем сделано изменение и ожидаемое поведение.
